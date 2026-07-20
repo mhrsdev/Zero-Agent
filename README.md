@@ -1,5 +1,25 @@
 # Zero — Independent Telegram AI Companion
 
+## License
+
+**English**
+
+Proprietary software. All rights reserved.
+
+Access to this repository does not grant permission to use, copy,
+modify, deploy, publish, or redistribute this project.
+
+Written permission from the copyright holder is required for any use.
+
+**فارسی**
+
+این نرم‌افزار اختصاصی است و کلیه‌ی حقوق آن محفوظ است.
+
+دسترسی به این repository هیچ اجازه‌ای برای استفاده، کپی، تغییر، استقرار،
+انتشار یا توزیع مجدد این پروژه ایجاد نمی‌کند.
+
+هرگونه استفاده نیازمند اجازه‌ی کتبی صاحب حق نشر است.
+
 <p align="center">
   <b>یک همراه هوشمند، طبیعی و حافظه‌دار برای گروه‌های تلگرام</b><br>
   <i>An independent, safety-first Telegram AI companion built for natural group interaction</i>
