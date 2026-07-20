@@ -1,0 +1,33 @@
+[Unit]
+Description=Zero Management Bot
+After=network-online.target
+
+[Service]
+Type=simple
+User=zero
+Group=zero
+WorkingDirectory=/root/zero
+Environment=ZERO_CONFIG_PATH=/etc/zero/zero.yaml
+Environment=ZERO_SECRET_FILE=/root/zero/runtime/secrets/zero.secrets.yaml
+Environment=ZERO_PANEL_HOST=127.0.0.1
+Environment=ZERO_PANEL_PORT=8787
+Environment=ZERO_PANEL_PUBLIC_BASE_URL=https://panel.nz2.ir
+ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_panel.py
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/root/zero/runtime/logs /root/zero/runtime/state /root/zero/runtime/pids
+
+[Install]
+WantedBy=multi-user.target

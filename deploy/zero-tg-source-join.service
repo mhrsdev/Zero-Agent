@@ -1,0 +1,13 @@
+[Unit]
+Description=Zero bounded Telegram source joiner
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=zero
+Group=zero
+WorkingDirectory=/root/zero
+ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/tg_source_manager.py join
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

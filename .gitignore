@@ -1,0 +1,64 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config/zero.yaml
+config/*secret*
+config/*secrets*
+runtime/
+
+# User data, memory, sessions, logs and generated state
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.session
+*.session-*
+*.log
+*.jsonl
+*.snapshot
+*.dat
+*.cache
+*.tmp
+*.temp
+*.swp
+*.swo
+*.pyc
+*.pyo
+*.key
+*.pem
+*.p12
+*.pass
+*.before
+*.before-*
+
+# Backups, archives and exported/runtime artifacts
+backups/
+archive/
+*.enc
+*.tar
+*.tar.gz
+*.zip
+*.sha256
+*.sha256sums
+tgsearch_joined.json
+
+# Local tooling and generated directories
+.git/
+.hermes/
+.pytest_cache/
+.venv/
+venv/
+env/
+__pycache__/
+node_modules/
+
+# Local-only live/debug helpers may contain identifiers or sessions
+scripts/real_tests.py
+scripts/live_search_e2e.py
+scripts/login_tgsearch.py
+scripts/join_tgsearch_channels.py
+scripts/send_debug_tests.py
+scripts/tg_source_manager.py
+scripts/sticker_prototype.py
+scripts/reaction_prototype.py

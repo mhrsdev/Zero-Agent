@@ -1,0 +1,132 @@
+owner_user_id: 0
+owner_username: "OWNER_USERNAME"
+management_bot:
+  token_file: "/path/to/secret/bot.env"
+  deny_message: "دسترسی نداری."
+listener:
+  telegram_api_id: 0
+  telegram_api_hash: ""
+  session_path: "/path/to/secret/user_session"
+  account_username: "LISTENER_USERNAME"
+  allowed_group_ids: []
+  allowed_group_usernames: []
+  allowed_group_titles: []
+  check_for_reply_to_self: true
+persona:
+  name_en: "Zero"
+  name_fa: "زیرو"
+  default_mode: "normal"
+  available_modes: ["normal", "funny", "sarcastic", "serious", "assistant", "teacher", "debate"]
+  trigger_words: ["zero", "Zero", "زیرو", "صفر"]
+  allow_random_interject: true
+  interject_probability: 0.12
+  idle_starter_probability: 0.35
+  min_interject_gap_seconds: 1500
+  min_starter_gap_seconds: 7200
+  idle_after_seconds: 2700
+policy:
+  max_reply_sentences: 4
+  max_reply_chars: 900
+  spam_cooldown_seconds: 90
+  user_window_seconds: 1800
+  user_max_replies_per_window: 8
+  user_max_replies_per_day: 40
+  bot_reply_cooldown_seconds: 900
+  bot_max_chain_turns: 4
+  anti_abuse_enabled: true
+  anti_spam_enabled: true
+router:
+  request_timeout_seconds: 45
+  retry_attempts: 2
+  simple_message_char_threshold: 140
+  daily_budget_soft_limit_usd: 5.0
+  providers:
+    gemini:
+      enabled: true
+      model: "gemini-3.1-flash-lite"
+      keys: []
+      rpm: 10
+      tpm: 250000
+      rpd: 100
+    openrouter:
+      enabled: true
+      model: "google/gemma-4-31b-it:free"
+      keys: []
+memory:
+  db_path: "/path/to/runtime/state/zero.db"
+  recent_messages_limit: 5000
+  memory_items_limit: 200
+  long_term_limit: 120
+  summary_trigger_messages: 120
+  per_user_profile_limit: 250
+reporting:
+  daily_report_hour_local: 0
+  send_daily_report_to_owner: true
+web:
+  enabled: false
+  google_grounding_enabled: true
+  searxng_base_url: "http://127.0.0.1:8888"
+  max_search_results: 6
+  request_timeout_seconds: 12
+  provider_retries: 1
+  cache_ttl_seconds: 1800
+  context_max_chars: 2500
+telegram_search:
+  enabled: false
+  api_id: 0
+  api_hash: ""
+  session_path: ""
+  allowed_chat_usernames: []
+  max_results_per_query: 10
+  cache_ttl_seconds: 900
+office:
+  enabled: false
+  rollout_required: true
+  rollout_user_ids: []
+  rollout_chat_ids: []
+  cli_path: "/usr/local/lib/zero-office/officecli"
+  workspace_root: "/root/zero/runtime/office_jobs"
+  quota:
+    jobs_per_user_per_day: 1
+    max_characters_per_job: 40000
+    timezone: "Asia/Tehran"
+    refund_on_internal_failure: true
+  admin_quota:
+    jobs_per_day: 20
+    max_characters_per_job: 150000
+  admin_user_ids: []
+  unlimited_admin_user_ids: []
+  limits:
+    max_input_files_per_job: 1
+    max_file_size_mb: 25
+    max_uncompressed_size_mb: 100
+    max_runtime_seconds: 300
+    max_repair_attempts: 2
+    max_slides: 40
+    max_sheets: 20
+    max_non_empty_cells: 20000
+    max_rows_per_sheet: 10000
+    max_columns_per_sheet: 200
+    max_formulas: 5000
+    max_embedded_images: 100
+    max_zip_entries: 5000
+    max_compression_ratio: 1000
+    max_xml_entry_mb: 20
+    max_memory_mb: 1024
+    max_output_size_mb: 50
+    max_cpu_seconds: 300
+    max_processes: 64
+  concurrency:
+    global_jobs: 1
+    per_user_jobs: 1
+  retention:
+    completed_job_hours: 24
+    failed_job_hours: 24
+  pending_attachment_ttl_minutes: 30
+  visual_review_enabled: true
+  lease_seconds: 360
+  max_attempts: 3
+logs:
+  listener_log: "/path/to/runtime/logs/listener.log"
+  panel_log: "/path/to/runtime/logs/panel.log"
+  router_log: "/path/to/runtime/logs/router.log"

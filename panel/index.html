@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#070914" />
+  <title>مرکز فرماندهی زیرو</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/panel/styles.css" />
+</head>
+<body>
+  <div class="space-bg" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+  <div id="toast" class="toast" role="status"></div>
+  <div id="login" class="login-shell">
+    <canvas id="space-canvas" aria-hidden="true"></canvas>
+    <button id="skip-animation" class="skip-animation" type="button">رد کردن انیمیشن</button>
+    <div class="login-orbit orbit-one"></div><div class="login-orbit orbit-two"></div>
+    <section class="login-card glass">
+      <div class="brand-mark"><span class="brand-core">Z</span><span class="brand-ring"></span></div>
+      <p class="eyebrow">ZERO COMMAND // SECURE GATE</p>
+      <h1>ورود به مرکز فرماندهی</h1>
+      <p class="muted">کد یکبارمصرف از طریق تلگرام برای شما ارسال می‌شود.</p>
+      <form id="request-form" class="auth-form">
+        <label for="identity">شناسه یا یوزرنیم تلگرام</label>
+        <input id="identity" name="identity" inputmode="text" autocomplete="username" placeholder="مثلاً 123456789 یا @username" required />
+        <button class="primary-button" type="submit">ارسال کد امن <span>←</span></button>
+      </form>
+      <form id="verify-form" class="auth-form hidden">
+        <label for="otp">کد شش رقمی تلگرام</label>
+        <input id="otp" name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="••••••" required />
+        <button class="primary-button" type="submit">ورود به سفینه <span>←</span></button>
+        <button id="back-login" class="text-button" type="button">تغییر شناسه</button>
+      </form>
+      <div class="login-foot"><span class="pulse-dot"></span> ارتباط رمزنگاری‌شده · بدون رمز عبور دائمی</div>
+    </section>
+  </div>
+  <div id="entry-transition" class="entry-transition hidden" aria-live="polite"><div class="transition-core">Z</div><p id="transition-text">Connecting to Zero Core</p><button id="skip-transition" class="text-button">رد کردن</button></div>
+  <div id="app" class="app-shell hidden">
+    <aside id="sidebar" class="sidebar glass">
+      <div class="sidebar-brand"><div class="mini-mark">Z</div><div><strong>زیرو</strong><small>COMMAND CENTER</small></div><button id="collapse" class="icon-button" aria-label="جمع کردن منو">☰</button></div>
+      <nav class="nav" aria-label="ناوبری اصلی">
+        <button class="nav-item active" data-page="dashboard"><span>◈</span><b>داشبورد</b></button>
+        <button class="nav-item" data-page="chat"><span>◌</span><b>گفتگوها</b></button>
+        <button class="nav-item" data-page="memory"><span>◈</span><b>حافظه</b></button>
+        <button class="nav-item" data-page="knowledge"><span>⌁</span><b>دانش</b></button>
+        <button class="nav-item" data-page="models"><span>◉</span><b>مدل‌ها و Provider</b></button>
+        <button class="nav-item" data-page="logs"><span>⌘</span><b>لاگ‌ها</b></button>
+        <button class="nav-item" data-page="jobs"><span>◷</span><b>Jobها</b></button>
+        <button class="nav-item" data-page="users"><span>◎</span><b>کاربران</b></button>
+        <button class="nav-item" data-page="settings"><span>⚙</span><b>تنظیمات</b></button>
+      </nav>
+      <div class="sidebar-bottom"><div class="status-line"><span class="pulse-dot"></span><span>Zero online</span><small id="latency">-- ms</small></div><button id="logout" class="logout-button">خروج امن</button></div>
+    </aside>
+    <main class="main-content">
+      <header class="topbar"><button id="mobile-menu" class="icon-button">☰</button><div><p class="eyebrow" id="page-kicker">MISSION CONTROL / LIVE</p><h2 id="page-title">داشبورد عملیاتی</h2></div><div class="top-actions"><button class="icon-button" title="اعلان‌ها">♢<span class="notification-dot"></span></button><div class="operator"><span class="avatar">O</span><span><strong>اپراتور ارشد</strong><small id="operator-name">مالک سیستم</small></span></div></div></header>
+      <div id="page" class="page-content"></div>
+    </main>
+  </div>
+  <script src="/panel/app.js" defer></script>
+</body>
+</html>

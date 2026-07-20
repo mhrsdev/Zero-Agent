@@ -1,0 +1,28 @@
+[Unit]
+Description=Zero Independent Telegram Listener
+After=network-online.target
+
+[Service]
+Type=simple
+User=zero
+Group=zero
+WorkingDirectory=/root/zero
+ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_listener.py
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/root/zero/runtime/logs /root/zero/runtime/state /root/zero/runtime/pids
+
+[Install]
+WantedBy=multi-user.target

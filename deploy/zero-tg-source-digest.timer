@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Zero Telegram World Model digest every 3 hours
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=3h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=zero-tg-source-digest.service
+
+[Install]
+WantedBy=timers.target
