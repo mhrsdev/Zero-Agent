@@ -111,6 +111,27 @@ async def test_profile_metadata_refreshes_even_for_untrusted_control_text(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_bot_message_is_archive_only_and_never_creates_human_memory(tmp_path):
+    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    store = ZeroStore(str(tmp_path / "memory.db"))
+    brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
+    bot = IncomingMessage(
+        chat_id=-1001, chat_title="g", sender_id=8252811591,
+        sender_label="@MyNovaChatBot", sender_is_bot=True,
+        text="فردا پروژهٔ مهم را انجام می‌دهم", message_id=42,
+        platform="telegram", account_scope="listener",
+    )
+
+    await brain.remember_message(bot)
+
+    rows = await store.get_recent(-1001, 1)
+    assert rows[0]["role"] == "bot"
+    with store._conn() as conn:
+        assert conn.execute("SELECT count(*) FROM medium_term_memory").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM memory_rag_documents").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
 async def test_period_summary_separates_telegram_and_local_source_ids(tmp_path):
     store = ZeroStore(str(tmp_path / "memory.db"))
     await store.append_recent(

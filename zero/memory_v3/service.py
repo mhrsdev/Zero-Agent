@@ -404,6 +404,8 @@ class MemoryV3Service:
             )
 
     async def record_message(self, message: Any, role: str = "user", text: str | None = None) -> None:
+        if role == "user" and getattr(message, "sender_is_bot", False):
+            return
         await asyncio.to_thread(self._record_message_sync, message, role, text)
 
     def _thread_context_sync(self, message: Any, max_depth: int, sibling_limit: int) -> ThreadContext:

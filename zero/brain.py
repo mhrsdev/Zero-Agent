@@ -1071,15 +1071,17 @@ class ZeroBrain:
         return decision, 'این تصویر رو نتونستم درست بررسی کنم؛ پاسخ حدسی نمی‌دم. دوباره بفرست.'
 
     async def remember_message(self, message: IncomingMessage, role: str = 'user') -> None:
+        # Bot messages remain an archive-only role; never let them enter human-memory paths.
+        effective_role = 'bot' if role == 'user' and message.sender_is_bot else role
         await self.store.append_recent(
-            message.chat_id, message.sender_id, message.sender_label, role, message.text,
+            message.chat_id, message.sender_id, message.sender_label, effective_role, message.text,
             platform=message.platform, account_scope=message.account_scope,
             telegram_message_id=message.message_id or None,
             reply_to_message_id=message.reply_to_message_id,
             thread_id=message.thread_id, sender_username=message.sender_username,
             sender_display_name=message.sender_display_name, trace_id=message.trace_id,
         )
-        await self.memory_v3.record_message(message, role=role)
+        await self.memory_v3.record_message(message, role=effective_role)
         if os.getenv('ZERO_GROUP_DOCUMENT_BUNDLING_ENABLED','false').lower()=='true' and role=='user' and not message.sender_is_bot:
             await self.document_bundles.observe(message)
         if os.getenv('ZERO_PROACTIVE_FOLLOWUP_ENABLED','false').lower()=='true' and role=='user' and not message.sender_is_bot:
