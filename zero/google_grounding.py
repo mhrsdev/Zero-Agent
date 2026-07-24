@@ -21,7 +21,11 @@ class GoogleGroundingSearch:
         self.enabled = bool(getattr(config.web, "google_grounding_enabled", True))
 
     async def run(self, text: str, *, trace_id: str = "-", **scope) -> SearchOutcome:
-        plan = QueryRewriter().rewrite(text)
+        plan = QueryRewriter().rewrite(
+            text,
+            reply_text=str(scope.get('reply_text') or ''),
+            recent_messages=scope.get('recent_messages'),
+        )
         intent = SearchIntent(bool(plan.query), SearchKind.WEB, True, "explicit_web_search" if plan.query else "none")
         outcome = SearchOutcome(intent=intent, plan=plan)
         if not intent.needed:

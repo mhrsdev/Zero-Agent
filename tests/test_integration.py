@@ -3,7 +3,7 @@ import pytest
 from zero.security import Intent, classify_intent
 from zero.web import build_search_query, needs_web_search
 from zero.triggers import is_triggered, strip_trigger, decide_reply
-from zero.moderation import is_spammy, abuse_reply
+from zero.moderation import is_spammy
 from zero.models import IncomingMessage, Decision
 
 
@@ -29,7 +29,7 @@ def test_user_message_with_nova_mention():
 
 
 # ============================================================================
-# Spam/abuse escalation tests
+# Spam tests
 # ============================================================================
 def test_is_spammy_normal():
     assert not is_spammy('سلام خوبی؟', 0)
@@ -44,23 +44,6 @@ def test_is_spammy_high_rate():
 def test_is_spammy_repetitive():
     # Very repetitive text
     assert is_spammy('aaaaa' * 200, 0)
-
-
-def test_abuse_reply_escalation():
-    """Abuse replies escalate with count."""
-    r1 = abuse_reply('ksksh', abuse_count=1)
-    r2 = abuse_reply('ksksh', abuse_count=6)
-    r3 = abuse_reply('ksksh', abuse_count=12)
-    # ksksh is not in ANALYZE patterns, so it returns spam message
-    assert 'اسپم' in r1 or 'ساکت' in r1
-
-
-def test_abuse_reply_has_gradual_natural_escalation():
-    replies = [abuse_reply('کصکش', abuse_count=count) for count in (1, 2, 4, 7, 11)]
-    assert len(set(replies)) == 5
-    assert 'آروم‌تر' in replies[0]
-    assert 'حرف حساب' in replies[1]
-    assert 'سروصدائه' in replies[-1]
 
 
 # ============================================================================

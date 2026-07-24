@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from urllib.parse import urlsplit
 
 from .models import QueryPlan, SearchKind
 
@@ -21,6 +22,13 @@ _GENERIC = {
     'حتما', 'حتماً', 'امروز', 'الان', 'جدید', 'اینترنت', 'پیدا', 'خب', 'خوب', 'حالا', 'پس', 'دوباره', 'بگو', 'please', 'search', 'find', 'lookup', 'zero', 'زیرو',
 }
 _DOMAIN_RE = re.compile(r'(?<![\w-])(?:https?://)?([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9-]+)+)')
+_URL_RE = re.compile(r'https?://[^\s<>\[\]()]+', re.I)
+_LINK_REQUEST_RE = re.compile(
+    r'(?:لینک|صفحه|پست|مقاله).{0,32}(?:باز|بخون|بررسی|تحلیل|چک|ببین)|'
+    r'(?:این|اون)?\s*(?:چیه|چیست|چی\s+هست)|'
+    r'(?:open|read|inspect|review|analy[sz]e).{0,32}(?:link|page|post|article)',
+    re.I,
+)
 
 
 class QueryRewriter:
@@ -36,6 +44,22 @@ class QueryRewriter:
         original = text or ''
         clean = _normalize(re.sub(r'\[(?:ZERO_TEST|ZERO_REG|WEBV2)[^\]]*\]', ' ', original, flags=re.I))
         recent_messages = recent_messages or []
+        reply_url = self._reply_url(reply_text)
+        current_url = self._reply_url(original)
+        target_url = reply_url or current_url
+        if not target_url and re.search(r'(?:قیمتش|مشخصاتش|اطلاعاتش|این|اون|همین|چنده\??)', clean):
+            for row in reversed(recent_messages[-12:]):
+                recent_url = self._reply_url(str(row.get('text', '') or ''))
+                if recent_url:
+                    target_url = recent_url
+                    break
+        if target_url and (not clean or _LINK_REQUEST_RE.search(clean) or re.search(r'(?:قیمتش|مشخصاتش|اطلاعاتش|چنده\??)', clean)):
+            domain = urlsplit(target_url).netloc.lower().removeprefix('www.')
+            return QueryPlan(
+                original=original, query=target_url, language='en', kind=kind,
+                preferred_domain=domain,
+                exact_terms=tuple(dict.fromkeys(t.lower() for t in _terms(target_url)[:8])),
+            )
         preferred_domain = self._preferred_domain(clean)
         topic_source = clean
         terms = _terms(clean)
@@ -86,6 +110,11 @@ class QueryRewriter:
             if re.search(rf'(?:از|تو|در)\s+{re.escape(alias)}\b', text) or f'{alias} ببین' in text:
                 return domain
         return ''
+
+    @staticmethod
+    def _reply_url(text: str) -> str:
+        match = _URL_RE.search(text or '')
+        return match.group(0).rstrip('.,،؛؟!') if match else ''
 
     def is_domain_only_followup(self, text: str) -> bool:
         clean = re.sub(r'\[(?:ZERO_TEST|ZERO_REG|WEBV2)[^\]]*\]', ' ', text or '', flags=re.I)

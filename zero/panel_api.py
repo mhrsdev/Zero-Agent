@@ -17,11 +17,12 @@ from typing import Any
 from aiohttp import web
 
 from .runtime_control import listener_status
+from .panel_store import DuplicateAdminError, PanelStore
 
 _PAGE_MAX = 100
 _SECRET = re.compile(r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;]+)|\b[A-Za-z0-9_-]{32,}\b")
 _ALLOWED_SETTINGS = {
-    'web_enabled','vision_enabled','tgsearch_enabled','mode','limit_challenge_enabled',
+    'web_enabled','vision_enabled','mode','limit_challenge_enabled',
     'reactions_enabled','reaction_chance_percent','reaction_max_per_hour','reaction_cooldown_seconds',
     'social_enabled','knowledge_backend','knowledge_auto_enabled','knowledge_runtime_limit_minutes',
 }
@@ -37,9 +38,10 @@ _MEMORY_TABLES = {
 class PanelAPI:
     """Authenticated owner-only web adapter over existing Zero services."""
 
-    def __init__(self, config, store, router, bot, *, static_dir: str | Path, services: dict[str, Any] | None = None):
+    def __init__(self, config, store, router, bot, *, static_dir: str | Path, services: dict[str, Any] | None = None, panel_store: PanelStore | None = None):
         self.config, self.store, self.router, self.bot = config, store, router, bot
         self.services = services or {}
+        self.panel_store = panel_store
         self.static_dir = Path(static_dir)
         self.pending: dict[str, dict[str, Any]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
@@ -51,6 +53,10 @@ class PanelAPI:
             web.post('/api/auth/request', self._request_code), web.post('/api/auth/verify', self._verify),
             web.get('/api/auth/me', self._me), web.post('/api/auth/logout', self._logout),
             web.post('/api/auth/logout-all', self._logout_all),
+            web.post('/api/local/auth/bootstrap', self._local_bootstrap), web.post('/api/local/auth/login', self._local_login),
+            web.get('/api/local/auth/me', self._local_me), web.post('/api/local/auth/change-password', self._local_change_password), web.post('/api/local/auth/logout', self._local_logout),
+            web.get('/api/local/setup', self._local_setup), web.post('/api/local/setup/{step}', self._local_setup_step), web.post('/api/local/setup/skip', self._local_setup_skip),
+            web.get('/api/local/dashboard', self._local_dashboard),
             web.get('/api/dashboard', self._dashboard), web.get('/api/realtime', self._realtime),
             web.get('/api/chats', self._chats), web.get(r'/api/chats/{item_id:\d+}', self._chat_detail),
             web.get('/api/memory/{layer}', self._memory_list), web.get('/api/memory/{layer}/{item_id}', self._memory_detail),
@@ -84,12 +90,107 @@ class PanelAPI:
         q.append(now); return await handler(request)
 
     def _json_error(self, message, status=400): return web.json_response({'error':message},status=status)
+
+    def _local_session(self, request):
+        if not self.panel_store:
+            return None
+        raw = request.cookies.get('zero_admin_session')
+        return self.panel_store.get_session(raw) if raw else None
+
+    def _local_require(self, request, *, csrf=False):
+        session = self._local_session(request)
+        if not session:
+            raise web.HTTPUnauthorized(text=json.dumps({'error': 'Authentication required'}), content_type='application/json')
+        if csrf and not hmac.compare_digest(request.headers.get('X-CSRF-Token', ''), session['csrf_token']):
+            raise web.HTTPForbidden(text=json.dumps({'error': 'Invalid CSRF token'}), content_type='application/json')
+        return session
+
+    async def _local_bootstrap(self, request):
+        if not self.panel_store:
+            return self._json_error('Local authentication is unavailable', 503)
+        data = await self._body(request)
+        try:
+            username, password = str(data.get('username', '')), str(data.get('password', ''))
+            admin_id = self.panel_store.create_admin(username, password, must_change_password=(username.strip().lower() == 'admin' and password == 'Admin'))
+        except DuplicateAdminError:
+            return self._json_error('Administrator already exists', 409)
+        except ValueError as exc:
+            return self._json_error(str(exc), 400)
+        return web.json_response({'created': True, 'admin_id': admin_id}, status=201)
+
+    async def _local_login(self, request):
+        if not self.panel_store:
+            return self._json_error('Local authentication is unavailable', 503)
+        data = await self._body(request)
+        admin = self.panel_store.verify_admin(str(data.get('username', '')), str(data.get('password', '')))
+        if not admin:
+            return self._json_error('Invalid username or password', 401)
+        token, csrf = self.panel_store.create_session(int(admin['id']))
+        response = web.json_response({'username': admin['username'], 'role': admin['role'], 'csrf': csrf, 'must_change_password': bool(admin.get('must_change_password'))})
+        response.set_cookie('zero_admin_session', token, httponly=True, secure=(request.secure or request.headers.get('X-Forwarded-Proto') == 'https'), samesite='strict', max_age=86400, path='/')
+        return response
+
+    async def _local_me(self, request):
+        session = self._local_require(request)
+        return web.json_response({'username': session['username'], 'role': session['role'], 'csrf': session['csrf_token'], 'must_change_password': bool(session.get('must_change_password'))})
+
+    async def _local_change_password(self, request):
+        session = self._local_require(request, csrf=True)
+        if not self.panel_store:
+            return self._json_error('Local authentication is unavailable', 503)
+        try:
+            data = await self._body(request)
+            self.panel_store.change_admin_password(int(session['admin_id']), str(data.get('current_password', '')), str(data.get('new_password', '')))
+        except ValueError as exc:
+            return self._json_error(str(exc), 400)
+        return web.json_response({'changed': True})
+
+    async def _local_logout(self, request):
+        self._local_require(request, csrf=True)
+        raw = request.cookies.get('zero_admin_session')
+        if raw and self.panel_store:
+            self.panel_store.revoke_session(raw)
+        response = web.json_response({'ok': True})
+        response.del_cookie('zero_admin_session', path='/')
+        return response
+
+    async def _local_setup(self, request):
+        self._local_require(request)
+        if not self.panel_store:
+            return self._json_error('Setup is unavailable', 503)
+        return web.json_response(self.panel_store.get_setup_state())
+
+    async def _local_setup_step(self, request):
+        self._local_require(request, csrf=True)
+        if not self.panel_store:
+            return self._json_error('Setup is unavailable', 503)
+        try:
+            self.panel_store.save_setup_step(request.match_info['step'], await self._body(request))
+        except ValueError as exc:
+            return self._json_error(str(exc), 400)
+        return web.json_response(self.panel_store.get_setup_state())
+
+    async def _local_setup_skip(self, request):
+        self._local_require(request, csrf=True)
+        if not self.panel_store:
+            return self._json_error('Setup is unavailable', 503)
+        self.panel_store.skip_setup()
+        return web.json_response(self.panel_store.get_setup_state())
+
+    async def _local_dashboard(self, request):
+        self._local_require(request)
+        return web.json_response(await self._dashboard_payload())
+
     def _hash(self, value): return hmac.new(int(self.config.owner_user_id).to_bytes(8,'big',signed=False),value.encode(),hashlib.sha256).hexdigest()
     def _session(self, request):
         raw=request.cookies.get('zero_session'); item=self.sessions.get(self._hash(raw or '')) if raw else None
         return item if item and item['expires']>time.time() else None
     def _require(self, request, *, csrf=False, write=False):
         session=self._session(request)
+        if not session:
+            local = self._local_session(request)
+            if local:
+                session = dict(local) | {'user_id': int(self.config.owner_user_id), 'csrf': local['csrf_token'], 'role': 'owner'}
         if not session: raise web.HTTPUnauthorized(text=json.dumps({'error':'نیاز به ورود است.'}),content_type='application/json')
         if write and session.get('role') != 'owner': raise web.HTTPForbidden(text=json.dumps({'error':'این حساب فقط دسترسی مشاهده دارد.'}),content_type='application/json')
         if csrf and not hmac.compare_digest(request.headers.get('X-CSRF-Token',''),session['csrf']): raise web.HTTPForbidden(text=json.dumps({'error':'CSRF نامعتبر است.'}),content_type='application/json')
@@ -181,7 +282,7 @@ class PanelAPI:
             info={x.split(':')[0]:x.split(':')[1] for x in Path('/proc/meminfo').read_text().splitlines()}; ram=f'{(1-int(info["MemAvailable"].split()[0])/int(info["MemTotal"].split()[0]))*100:.0f}%'
         except Exception:pass
         disk=os.statvfs(self.config.memory.db_path); active=self.config.router.normal_primary
-        return {'status':{'listener':status['running'],'cpu':f'{os.getloadavg()[0]:.2f}','ram':ram,'disk':f'{disk.f_bavail/disk.f_blocks*100:.0f}% آزاد'},'provider':{'active':active,'model':provider.get('providers',{}).get(active,{}).get('model','')},'activity':list(self.login_audit)[:5]}
+        return {'status':{'listener':status['running'],'cpu':f'{os.getloadavg()[0]:.2f}','ram':ram,'disk':f'{disk.f_bavail/disk.f_blocks*100:.0f}% free'},'provider':{'active':active,'model':provider.get('providers',{}).get(active,{}).get('model','')},'activity':list(self.login_audit)[:5]}
     async def _dashboard(self,request):self._require(request); return web.json_response(await self._dashboard_payload())
     async def _realtime(self,request):
         self._require(request); response=web.StreamResponse(headers={'Content-Type':'text/event-stream','Cache-Control':'no-cache','X-Accel-Buffering':'no'}); await response.prepare(request)
@@ -308,7 +409,7 @@ class PanelAPI:
         p=Path(path);return {'configured':p.exists() and p.stat().st_size>0,'permission_valid':p.exists() and (p.stat().st_mode & 0o077)==0,'last_rotated':int(p.stat().st_mtime) if p.exists() else None}
     async def _settings(self,request):
         self._require(request);overrides={k:self._redact(v) for k,v in (await self.store.panel_get_settings(_ALLOWED_SETTINGS)).items()}
-        cfg={'telegram':{'account_username':self.config.listener.account_username,'allowed_groups':self.config.listener.allowed_group_usernames},'memory':{'recent_messages_limit':self.config.memory.recent_messages_limit,'long_term_limit':self.config.memory.long_term_limit},'router':{'primary':self.config.router.normal_primary,'fallback':self.config.router.normal_fallback,'strategy':self.config.router.strategy},'search':{'web_enabled':self.config.web.enabled,'telegram_archived':self.config.telegram_search.archived},'limits':self.config.policy.model_dump(),'reaction':self.config.reactions.model_dump(),'sticker':self.config.stickers.model_dump()}
+        cfg={'telegram':{'account_username':self.config.listener.account_username,'allowed_groups':self.config.listener.allowed_group_usernames},'memory':{'recent_messages_limit':self.config.memory.recent_messages_limit,'long_term_limit':self.config.memory.long_term_limit},'router':{'primary':self.config.router.normal_primary,'fallback':self.config.router.normal_fallback,'strategy':self.config.router.strategy},'search':{'web_enabled':self.config.web.enabled},'limits':self.config.policy.model_dump(),'reaction':self.config.reactions.model_dump(),'sticker':self.config.stickers.model_dump()}
         secrets_state={'management_bot':self._secret_status(self.config.management_bot.token_file),'provider_secrets':self._secret_status(os.environ.get('ZERO_SECRET_FILE','/root/zero/runtime/secrets/zero.secrets.yaml'))}
         return web.json_response({'config':cfg,'overrides':overrides,'secrets':secrets_state,'editable':sorted(_ALLOWED_SETTINGS)})
     async def _setting_update(self,request):

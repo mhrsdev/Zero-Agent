@@ -113,6 +113,8 @@ async def test_readiness_bounded_pagination_sse_and_secret_protection(panel):
     memory=await (await client.get('/api/memory/semantic?size=10000',headers=headers)).json();assert memory['size']==100
     stream=await client.get('/api/realtime',headers=headers);assert stream.status==200;assert stream.headers['Content-Type'].startswith('text/event-stream');stream.close()
     settings=await (await client.get('/api/settings',headers=headers)).json();assert settings['secrets']['management_bot']['configured'] is True
+    assert 'tgsearch_enabled' not in settings['editable']
+    assert 'telegram_archived' not in str(settings)
     payload=str(settings);assert 'configured' in payload and 'hidden-secret' not in payload
 
 

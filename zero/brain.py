@@ -18,7 +18,7 @@ from .proactive_followups import ProactiveFollowups
 from .document_bundles import DocumentBundles
 from .memory_v3 import MemoryV3Service
 from .memory_v3.retrieval_planner import metadata as planner_metadata, parse as parse_retrieval_plan, prompt as planner_prompt, window as planner_window
-from .market_prices import BinancePriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError
+from .market_prices import BinancePriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError, TGJUWebPriceClient
 from .semantic_memory import SemanticUserMemory
 from .experience_memory import ExperienceMemory
 from .procedural_memory import ProceduralMemory
@@ -35,7 +35,7 @@ from .memory import (
     extract_explicit_long_candidate,
     extract_nickname_correction,
 )
-from .moderation import abuse_reply, is_spammy
+from .moderation import is_spammy
 from .models import Decision, IncomingMessage
 from .prompts import build_reply_prompt, build_starter_prompt, build_summary_prompt, build_summary_merge_prompt
 from .router import IndependentRouter
@@ -76,6 +76,27 @@ def reply_char_limit(config: ZeroConfig, text: str) -> int:
 
 def reply_token_limit(text: str) -> int:
     return 2200 if needs_long_reply(text) else 700
+
+
+def deterministic_market_tool_calls(text: str) -> list[dict]:
+    low = (text or '').casefold().replace('ي', 'ی').replace('ك', 'ک')
+    calls = []
+    if re.search(r'دلار|usd|dollar', low):
+        calls.append({'name': 'read_iran_market_price', 'arguments': {'asset': 'usd'}})
+    if re.search(r'طلا|عیار|gold', low):
+        calls.append({'name': 'read_iran_market_price', 'arguments': {'asset': '18ayar'}})
+    if re.search(r'سکه(?:\s+امامی)?|coin', low):
+        calls.append({'name': 'read_iran_market_price', 'arguments': {'asset': 'sekkeh'}})
+    for markers, symbol in (
+        (r'بیت\s*کوین|بیتکوین|bitcoin|btc', 'BTC'),
+        (r'اتریوم|ethereum|eth', 'ETH'),
+        (r'سولانا|solana|sol', 'SOL'),
+    ):
+        if re.search(markers, low):
+            calls.append({'name': 'read_market_price', 'arguments': {'symbol': symbol, 'quote': 'USDT'}})
+    return calls
+
+
 _VALID_MOODS = frozenset(['funny', 'sad', 'love', 'angry', 'greeting', 'react',
                           'cool', 'shock', 'surprise', 'thinking', 'approve', 'fire',
                           'celebrate', 'pray', 'smirk', 'dead'])
@@ -232,6 +253,7 @@ class ZeroBrain:
         self.knowledge = knowledge
         self.market_prices = BinancePriceClient()
         self.navasan_prices = NavasanPriceClient()
+        self.tgju_prices = TGJUWebPriceClient()
         self.nobitex_prices = NobitexPriceClient()
         self.semantic_memory = SemanticUserMemory(store.db_path)
         self.experience_memory = ExperienceMemory(store.db_path)
@@ -498,8 +520,6 @@ class ZeroBrain:
             return Decision(True, 'security'), fixed_security_reply()
         if looks_abusive(message.text):
             await self.store.add_rate_event(message.sender_id, 'abuse', message.chat_id)
-            abuse_count = await self.store.count_rate_events(message.sender_id, 'abuse', 7 * 24 * 3600, message.chat_id)
-            return decision, abuse_reply(message.text, abuse_count)
         if spam_blocked:
             return Decision(True, 'spam_soft_block'), 'کمتر اسپم کن که جواب بهتر بگیری 🙂'
         nova_ok, reason = await self._check_nova_conversation_limit(message)
@@ -527,11 +547,13 @@ class ZeroBrain:
         tools = [
             {'name': 'read_knowledge', 'description': 'Read relevant source-backed public facts and news from Zero Knowledge Memory. Use only when needed; do not use for greetings or casual conversation.', 'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The focused subject to look up.'}, 'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 5}}, 'required': ['query']}},
             {'name': 'read_market_price', 'description': 'Read a current public Binance Spot crypto price. Use for cryptocurrency price/rate requests. Never invent a number; the result includes source, unit, market type, and timestamp.', 'parameters': {'type': 'object', 'properties': {'symbol': {'type': 'string', 'description': 'Base crypto asset, e.g. BTC, ETH, BNB, SOL.'}, 'quote': {'type': 'string', 'description': 'Quote asset, normally USDT.'}}, 'required': ['symbol']}},
-            {'name': 'read_iran_market_price', 'description': 'Read current Iran gold and coin rates from Navasan. Use only for 18k gold or Imam Khomeini coin. Symbols: 18ayar, sekkeh. Never invent a number; result includes IRR unit, source, change, and timestamp.', 'parameters': {'type': 'object', 'properties': {'asset': {'type': 'string', 'enum': ['18ayar', 'sekkeh']}}, 'required': ['asset']}},
+            {'name': 'read_iran_market_price', 'description': 'Read current Iran dollar, gold, and coin rates from Navasan. Symbols: usd, 18ayar, sekkeh. Never invent a number; result includes unit, source, change, and timestamp.', 'parameters': {'type': 'object', 'properties': {'asset': {'type': 'string', 'enum': ['usd', '18ayar', 'sekkeh']}}, 'required': ['asset']}},
             {'name': 'read_usdt_toman_price', 'description': 'Read the current USDT/Toman order book from Nobitex. Returns best ask (buy), best bid (sell), average, unit Toman, source, market type, and timestamp. Never invent a number.', 'parameters': {'type': 'object', 'properties': {}}},
         ]
         result = await complete_with_tools(prompt, tools, max_output_tokens=reply_token_limit(message.text or ''))
         calls = result.metadata.get('tool_calls', []) if result.metadata else []
+        if not calls:
+            calls = deterministic_market_tool_calls(message.text) if is_current_price_or_market_query(message.text) else []
         if not calls:
             raw = sanitize_internal_search_status(result.text or '')
             if not raw:
@@ -564,7 +586,15 @@ class ZeroBrain:
                     value = await self.navasan_prices.get_price(asset)
                     encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
                 except PriceAPIError as exc:
-                    encoded = json.dumps({'error': str(exc), 'source': 'Navasan API'}, ensure_ascii=False)
+                    if asset in {'18ayar', 'sekkeh'}:
+                        try:
+                            value = await self.tgju_prices.get_price(asset)
+                            encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+                            logger.info('MARKET_WEB_FALLBACK_USED trace_id=%s asset=%s source=TGJU', message.trace_id or '-', asset)
+                        except PriceAPIError as web_exc:
+                            encoded = json.dumps({'error': str(exc), 'web_fallback_error': str(web_exc), 'source': 'Navasan API + TGJU'}, ensure_ascii=False)
+                    else:
+                        encoded = json.dumps({'error': str(exc), 'source': 'Navasan API'}, ensure_ascii=False)
                 blocks.append(f'[TOOL_RESULT read_iran_market_price]\n{encoded}\n[/TOOL_RESULT]')
                 logger.info('IRAN_MARKET_PRICE_TOOL_EXECUTED trace_id=%s asset=%s', message.trace_id or '-', asset)
             elif name == 'read_usdt_toman_price':
@@ -770,8 +800,9 @@ class ZeroBrain:
         is_telegram_request = is_telegram_search_request(clean_user_text)
         web_enabled = await self.web.is_tool_enabled()
         natural_web_intent = bool(search_text and needs_web_search(search_text))
-        web_intent = bool(search_text and (search_command or natural_web_intent))
-        logger.info('WEB_SEARCH_ENABLED_CHECK trace_id=%s enabled=%s intent=%s natural=%s mode=%s', trace_id, web_enabled, web_intent, natural_web_intent, search_mode or 'natural')
+        market_tool_intent = bool(search_text and is_current_price_or_market_query(search_text))
+        web_intent = bool(search_text and (search_command or natural_web_intent) and not market_tool_intent)
+        logger.info('WEB_SEARCH_ENABLED_CHECK trace_id=%s enabled=%s intent=%s natural=%s market_tool=%s mode=%s', trace_id, web_enabled, web_intent, natural_web_intent, market_tool_intent, search_mode or 'natural')
         if not web_enabled:
             logger.info('WEB_SEARCH_SKIPPED trace_id=%s reason=disabled', trace_id)
             if web_intent:
@@ -1006,6 +1037,15 @@ class ZeroBrain:
         vision_result = await self.vision.process(media_event, question=clean_user_text)
         if vision_result:
             recent = await self.store.get_recent(message.chat_id, limit=100)
+            has_link_context = bool(
+                re.search(r'https?://\S+', clean_user_text or '')
+                or re.search(r'https?://\S+', message.reply_text or '')
+                or any(re.search(r'https?://\S+', str(row.get('text', '') or '')) for row in recent[-12:])
+            )
+            asks_about_link = bool(re.search(r'(?:قیمت|چنده|مشخصات|اطلاعات|این|اون|همین|چیست|چیه|؟|\?)', clean_user_text or ''))
+            if has_link_context and asks_about_link:
+                enriched = replace(message, text=f'{clean_user_text}\n\n[Vision Analysis: {vision_result}]')
+                return await self._handle_no_media(enriched, Decision(True, 'vision_web'), classify_intent(enriched.text, enriched.reply_text))
             layered = await self.store.retrieve_layered_memory(message.chat_id, clean_user_text, sender_id=message.sender_id, short_limit=1, medium_limit=4, long_limit=6)
             memory_context, memory_meta = await compose_memory_context(
                 store=self.store, semantic_memory=self.semantic_memory, message=message,

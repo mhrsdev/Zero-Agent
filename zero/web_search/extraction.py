@@ -31,6 +31,16 @@ class WebExtractor:
         await asyncio.gather(*(one(result) for result in results[:max(0, limit)]))
         return results
 
+    async def extract_url(self, url: str, query: str = '') -> SearchResult:
+        if not _safe_public_url(url):
+            raise ValueError('unsafe public URL')
+        html = await self.transport.get_text(url, self.request_timeout, self.max_bytes)
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', html or '', flags=re.I | re.S)
+        title = re.sub(r'\s+', ' ', unescape(title_match.group(1))).strip() if title_match else url
+        text = _html_to_text(html)
+        extract = _relevant_extract(text, query or title, self.max_extract_chars)
+        return SearchResult(title=title[:300], url=url, snippet=extract[:500], relevant_extract=extract, provider='direct-url')
+
 
 def _safe_public_url(url: str) -> bool:
     parts = urlsplit(url)

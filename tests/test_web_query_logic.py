@@ -1,11 +1,15 @@
 from zero.web import build_search_query, needs_web_search, is_deep_search_request
-from zero.brain import build_live_market_disclosure, is_telegram_search_request, is_media_followup_text, parse_search_command, reply_token_limit
+from zero.brain import build_live_market_disclosure, deterministic_market_tool_calls, is_telegram_search_request, is_media_followup_text, parse_search_command, reply_token_limit
 from zero.config import ZeroConfig
 from zero.prompts import build_reply_prompt
 
 
 def test_needs_web_search_does_not_match_khoobi():
     assert needs_web_search('سلام خوبی؟') is False
+
+
+def test_how_to_question_stays_normal_without_freshness_or_search_request():
+    assert needs_web_search('چطور پایتون یاد بگیرم؟') is False
 
 
 def test_search_command_only_accepts_slash_search_at_first_character():
@@ -40,6 +44,40 @@ def test_quoted_reported_question_does_not_trigger_web_search():
     text = 'یکی از بچه‌ها پرسید «درباره‌ی فلان موضوع چیه؟» و من جواب دادم.'
     assert needs_web_search(text) is False
     assert needs_web_search('Gemini چیه؟') is False
+
+
+def test_report_about_a_domain_does_not_trigger_web_search():
+    assert needs_web_search('ببین رفت تو my.medu.ir سرچ کرد جواب رو گفت') is False
+
+
+def test_explicit_search_request_for_a_domain_still_triggers_web_search():
+    assert needs_web_search('برو تو my.medu.ir سرچ کن') is True
+
+
+def test_url_question_in_current_message_triggers_web_search():
+    text = 'زیرو منبع: X https://share.google/Ci1HsSOyy98ohljSF این چیه؟'
+    assert needs_web_search(text) is True
+    assert build_search_query(text) == 'https://share.google/Ci1HsSOyy98ohljSF'
+
+
+def test_url_price_question_before_url_triggers_web_search():
+    text = 'زیرو این چیه؟ قیمتش چنده؟ https://www.digikala.com/product/dkp-11801878'
+    assert needs_web_search(text) is True
+    assert build_search_query(text) == 'https://www.digikala.com/product/dkp-11801878'
+
+
+def test_price_followup_reuses_url_from_recent_user_message():
+    recent = [{'role': 'user', 'text': 'زیرو این چیه؟ https://www.digikala.com/product/dkp-11801878'}]
+    assert build_search_query('قیمتش چنده؟', recent_messages=recent) == 'https://www.digikala.com/product/dkp-11801878'
+
+
+def test_market_request_gets_deterministic_tool_calls_for_each_asset():
+    calls = deterministic_market_tool_calls('قیمت دلار و سکه امامی چنده؟ بیتکوین هم بگو')
+    assert calls == [
+        {'name': 'read_iran_market_price', 'arguments': {'asset': 'usd'}},
+        {'name': 'read_iran_market_price', 'arguments': {'asset': 'sekkeh'}},
+        {'name': 'read_market_price', 'arguments': {'symbol': 'BTC', 'quote': 'USDT'}},
+    ]
 
 
 def test_bare_search_request_is_detected_for_clarification():
@@ -82,6 +120,24 @@ def test_build_search_query_keeps_real_topic_words():
     query = build_search_query('درباره قیمت بیت کوین امروز سرچ کن')
     assert 'بیت' in query or 'بیتکوین' in query
     assert 'سرچ' not in query
+
+
+def test_link_request_uses_reply_url_instead_of_instruction_words():
+    query = build_search_query(
+        'این لینک رو باز کن و بررسی کن',
+        reply_text='https://www.linkedin.com/posts/example_activity-123',
+    )
+    assert query == 'https://www.linkedin.com/posts/example_activity-123'
+
+
+def test_search_command_without_query_can_use_replied_url():
+    assert build_search_query(
+        '', reply_text='https://example.com/article',
+    ) == 'https://example.com/article'
+
+
+def test_generic_full_report_does_not_promote_normal_search_to_deep_search():
+    assert is_deep_search_request('درباره Kimi گزارش کامل بده') is False
 
 
 def test_current_price_query_activates_shared_web_planner():

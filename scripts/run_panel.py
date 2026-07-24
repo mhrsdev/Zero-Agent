@@ -36,6 +36,7 @@ from zero.social_awareness import SocialAwareness, parse_awareness_command
 from zero.template_jobs import TemplateJobService, JobSecurityError, parse_natural_job
 from zero.knowledge import KnowledgeWorker
 from zero.panel_api import PanelAPI
+from zero.panel_store import PanelStore
 
 CONFIG_PATH = Path(os.environ.get('ZERO_CONFIG_PATH', '/etc/zero/zero.yaml'))
 
@@ -75,6 +76,7 @@ async def main() -> None:
     panel_api = PanelAPI(
         config, store, router, bot, static_dir=ROOT / 'panel',
         services={'knowledge': knowledge, 'jobs': jobs, 'semantic': semantic, 'experience': experience, 'procedure': procedure, 'world': world},
+        panel_store=PanelStore(Path(config.memory.db_path).with_name('panel.db')),
     )
     await panel_api.start(host=os.environ.get('ZERO_PANEL_HOST', '127.0.0.1'), port=int(os.environ.get('ZERO_PANEL_PORT', '8787')))
     logger.info('ZERO_PANEL_API_STARTED host=%s port=%s', os.environ.get('ZERO_PANEL_HOST', '127.0.0.1'), os.environ.get('ZERO_PANEL_PORT', '8787'))

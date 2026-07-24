@@ -131,6 +131,48 @@ class NavasanPriceClient:
         return (await self.get_prices((item,)))[item]
 
 
+class TGJUWebPriceClient:
+    """Read a public TGJU profile as a last-resort web fallback."""
+    BASE_URL = 'https://www.tgju.org/profile/'
+    SLUGS = {'18ayar': 'geram18', 'sekkeh': 'sekee'}
+    _price_re = re.compile(r'class="price"\s+data-col="info\.last_trade\.PDrCotVal">\s*([\d,]+)')
+
+    async def get_price(self, item: str) -> dict[str, Any]:
+        asset = str(item or '').strip().lower()
+        slug = self.SLUGS.get(asset)
+        if not slug:
+            raise PriceAPIError('نماد fallback وب معتبر نیست.')
+        url = self.BASE_URL + slug
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+                async with session.get(url, headers={'User-Agent': 'Zero-WebMarket/1.0'}) as response:
+                    response.raise_for_status()
+                    body = await response.text(errors='ignore')
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise PriceAPIError('TGJU فعلاً پاسخ نداد.') from exc
+        match = self._price_re.search(body)
+        if not match:
+            raise PriceAPIError('TGJU قیمت معتبر قابل استخراج نداد.')
+        try:
+            rial = Decimal(match.group(1).replace(',', ''))
+        except (InvalidOperation, ValueError) as exc:
+            raise PriceAPIError('قیمت TGJU معتبر نیست.') from exc
+        if not rial.is_finite() or rial <= 0:
+            raise PriceAPIError('قیمت TGJU معتبر نیست.')
+        toman = rial / Decimal('10')
+        return {
+            'asset': asset,
+            'value': str(toman),
+            'unit': 'تومان',
+            'market_type': 'Iran market web fallback',
+            'source': 'TGJU public web profile',
+            'source_url': url,
+            'raw_unit': 'ریال',
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'cached': False,
+        }
+
+
 class NobitexPriceClient:
     BASE_URL = 'https://api.nobitex.ir/v2/orderbook/USDTIRT'
     CACHE_TTL = 5.0

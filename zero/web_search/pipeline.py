@@ -71,7 +71,7 @@ class SearchPipeline:
         deep: bool = False,
     ) -> SearchOutcome:
         intent = self.intent_detector.detect(text)
-        if force_search and text.strip():
+        if force_search and (text.strip() or reply_text.strip()):
             intent = SearchIntent(True, SearchKind.WEB, True, 'explicit_web_search')
         logger.info('WEB_INTENT trace_id=%s needed=%s kind=%s supported=%s category=%s', trace_id, intent.needed, intent.kind.value, intent.supported, intent.category)
         domain_followup = self.query_rewriter.is_domain_only_followup(text)

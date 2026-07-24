@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlsplit
 
 from .config import ZeroConfig
 from .google_grounding import GoogleGroundingSearch
@@ -13,7 +14,7 @@ from .web_search.cache import TTLCache
 from .web_search.context import WebContextBuilder
 from .web_search.extraction import WebExtractor
 from .web_search.intent import SearchIntentDetector, is_current_market_query
-from .web_search.models import SearchIntent, SearchKind, SearchOutcome, SearchResult
+from .web_search.models import QueryPlan, SearchIntent, SearchKind, SearchOutcome, SearchResult
 from .web_search.orchestrator import SearchOrchestrator
 from .web_search.pipeline import SearchPipeline
 from .web_search.providers.base import ProviderRegistry
@@ -23,6 +24,8 @@ from .web_search.transport import ConnectionPoolTransport
 from .web_search.truth import TruthfulnessGuard
 
 logger = logging.getLogger('zero.web')
+_DIRECT_URL_RE = re.compile(r'https?://[^\s<>\[\]()]+', re.I)
+_DIRECT_URL_QUESTION_RE = re.compile(r'(?:این|اون|چه|چی|چیه|چیست|قیمت|مشخصات|سایت|لینک|محصول|کالا|\?|؟)', re.I)
 
 
 @dataclass(slots=True)
@@ -119,6 +122,17 @@ class HybridWeb:
 
     async def run(self, text: str, **kwargs) -> SearchOutcome:
         kwargs.setdefault('force_search', True)
+        url_match = _DIRECT_URL_RE.search(text or '')
+        if url_match and _DIRECT_URL_QUESTION_RE.search(text or ''):
+            url = url_match.group(0).rstrip('.,،؛؟!')
+            plan = QueryPlan(original=text or '', query=url, language='fa', preferred_domain=urlsplit(url).netloc)
+            intent = SearchIntent(True, SearchKind.WEB, True, 'direct_url_inspection')
+            try:
+                result = await self._local_pipeline.extractor.extract_url(url, text or '')
+                return SearchOutcome(intent=intent, plan=plan, results=[result], context=self._local_pipeline.context_builder.build(plan, [result]))
+            except Exception as exc:
+                logger.info('DIRECT_URL_FETCH_FAILED url_host=%s exception_type=%s', urlsplit(url).netloc, type(exc).__name__)
+                return SearchOutcome(intent=intent, plan=plan, no_results=True, all_providers_failed=True)
         return await self._orchestrator.run(text, **kwargs)
 
     def search(self, raw_query: str, enabled_override: Optional[bool] = None) -> list[SearchHit]:

@@ -43,7 +43,7 @@ router:
   providers:
     gemini:
       enabled: true
-      model: "gemini-3.1-flash-lite"
+      model: "gemini-3.5-flash-lite"
       keys: []
       rpm: 10
       tpm: 250000

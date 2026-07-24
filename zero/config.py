@@ -191,7 +191,7 @@ class TelegramSearchConfig(BaseModel):
 
 class VisionConfig(BaseModel):
     enabled: bool = True
-    model: str = "gemini-3.1-flash-lite"
+    model: str = "gemini-3.5-flash-lite"
     max_images_per_user_per_window: int = 8
     max_gifs_per_user_per_window: int = 4
     window_seconds: int = 900

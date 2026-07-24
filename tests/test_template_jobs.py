@@ -28,6 +28,7 @@ def test_next_run_honors_persisted_asia_tehran_timezone_not_host_timezone():
         ('هر روز ساعت ۸ اخبار AI را بگو', 'ai_news', {'kind': 'daily', 'hour': 8}),
         ('هر شب ساعت ۲۲ خلاصه گروه را بفرست', 'group_summary', {'kind': 'daily', 'hour': 22}),
         ('هر ۶ ساعت اخبار مهم جنگ‌های جهان اوکراین غزه را بگو', 'war_news', {'kind': 'interval', 'seconds': 21600}),
+        ('هر ۱۲ ساعت ترندهای گیت‌هاب را بررسی کن', 'github_trending_digest', {'kind': 'interval', 'seconds': 43200}),
         ('هر جمعه ساعت ۹ خلاصه هفته را بفرست', 'weekly_summary', {'kind': 'weekly', 'weekday': 4}),
         ('هر روز ساعت ۹ قیمت اتریوم را بررسی کن', 'crypto_price', {'kind': 'daily', 'hour': 9}),
         ('هر ماه اول ماه ساعت ۹ خلاصه آمار گروه را بده', 'social_stats', {'kind': 'monthly', 'day': 1}),

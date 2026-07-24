@@ -10,6 +10,8 @@ from zero.web_search.providers.searxng import SearXNGProvider
 from zero.web_search.transport import ConnectionPoolTransport
 from zero.config import ZeroConfig
 from zero.web import HybridWeb
+from zero.google_grounding import GoogleGroundingSearch
+from zero.models import RouteResult
 
 
 class ForcedIntent:
@@ -196,6 +198,43 @@ async def test_searxng_tier_sends_only_its_declared_engines():
     assert 'engines=google+cse' in transport.urls[0]
     assert results[0].provider == 'searxng-google'
     assert results[0].metadata['engine'] == 'google cse'
+
+
+@pytest.mark.asyncio
+async def test_searxng_filters_declared_engines_before_result_cap():
+    class MixedTransport:
+        async def get_text(self, url, timeout, max_bytes):
+            rows = [{'title': f'noise-{i}', 'url': f'https://noise{i}.example', 'engine': 'brave'} for i in range(6)]
+            rows.append({'title': 'wanted', 'url': 'https://wanted.example', 'engine': 'google cse'})
+            return __import__('json').dumps({'results': rows})
+
+    provider = SearXNGProvider('http://127.0.0.1:8888', MixedTransport(), max_results=1, engines=('google cse',))
+    results = await provider.search(QueryPlan(original='q', query='q', language='en'))
+
+    assert [result.title for result in results] == ['wanted']
+
+
+@pytest.mark.asyncio
+async def test_google_grounding_uses_reply_url_as_search_query():
+    class Router:
+        def __init__(self):
+            self.prompt = ''
+
+        async def complete_search(self, prompt, *, max_output_tokens):
+            self.prompt = prompt
+            return RouteResult(
+                text='grounded', provider='gemini', model='test', attempts=1,
+                metadata={'raw': {'candidates': [{'groundingMetadata': {'groundingChunks': [{'web': {'uri': 'https://example.com/article', 'title': 'Article'}}]}}]}},
+            )
+
+    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    router = Router()
+    outcome = await GoogleGroundingSearch(config, router).run(
+        'این لینک رو باز کن و بررسی کن', reply_text='https://example.com/article',
+    )
+
+    assert router.prompt == 'https://example.com/article'
+    assert outcome.results[0].url == 'https://example.com/article'
 
 
 @pytest.mark.asyncio

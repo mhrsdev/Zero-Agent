@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from .config import ZeroConfig
 from .storage import ZeroStore
+from .github_trending import GithubTrendingProvider, SOURCE_URL, render_github_digest_with_router
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ TEMPLATE_REGISTRY: dict[str, Template] = {
     'reminder': Template('reminder', '1.0.0', 'Reminder', 'low', False, frozenset({'text'})),
     'ai_news': Template('ai_news', '1.1.0', 'AI News', 'medium', True, frozenset({'query', 'only_new'})),
     'daily_news': Template('daily_news', '1.1.0', 'Daily News', 'medium', True, frozenset({'query', 'only_new'})),
+    'github_trending_digest': Template('github_trending_digest', '1.0.0', 'GitHub Trending Digest', 'medium', True, frozenset({'only_new', 'force'})),
     'war_news': Template('war_news', '1.0.0', 'War News', 'medium', True, frozenset({'query', 'only_new'})),
     'telegram_digest': Template('telegram_digest', '1.0.0', 'Telegram Digest', 'medium', True, frozenset({'query'})),
     'search_digest': Template('search_digest', '1.0.0', 'Search Digest', 'medium', True, frozenset({'query'})),
@@ -173,6 +175,8 @@ def parse_natural_job(text: str) -> tuple[str, dict[str, Any], dict[str, Any], s
     only_new = bool(re.search(r'تکراری|خبر جدید نبود|چیزی نگه|فقط جدید', lower))
     if any(x in lower for x in ('جنگ', 'اوکراین', 'غزه', 'درگیری', 'iran امریکا', 'ایران آمریکا')):
         template, inputs = 'war_news', {'query': 'latest world war news Ukraine Gaza Iran US conflicts', 'only_new': only_new}
+    elif any(x in lower for x in ('گیت هاب', 'گیت‌هاب', 'github')) and any(x in lower for x in ('ترند', 'ترندها', 'trending')):
+        template, inputs = 'github_trending_digest', {'only_new': True}
     elif any(x in lower for x in ('اخبار ai', 'هوش مصنوعی', 'gemini', 'openai', 'claude')) or re.search(r'\bai\b', lower):
         template, inputs = 'ai_news', {'query': 'latest AI news', 'only_new': only_new}
     elif 'اتریوم' in lower or re.search(r'\beth\b|ethereum', lower):
@@ -201,9 +205,13 @@ class TemplateJobService:
     def __init__(
         self, store: ZeroStore, config: ZeroConfig, web: Any | None = None,
         knowledge: Any | None = None, summary_builder: Any | None = None,
+        router: Any | None = None,
     ):
         self.store, self.config, self.web, self.knowledge = store, config, web, knowledge
         self.summary_builder = summary_builder
+        self.router = router
+        self.github_trending = GithubTrendingProvider()
+        self._github_pending: dict[str, list[dict[str, Any]]] = {}
 
     async def _audit(self, actor: int, action: str, obj_type: str, obj_id: str, details: dict[str, Any], trace_id: str = '') -> None:
         role = await self.role_for(actor)
@@ -360,6 +368,26 @@ class TemplateJobService:
             if self.knowledge is None: return 'KNOWLEDGE_RUN_FAILED: worker_not_configured'
             result = await self.knowledge.run_nightly(dry_run=False)
             return 'KNOWLEDGE_RUN_COMPLETED ' + _json(result)
+        if template == 'github_trending_digest':
+            candidates = await asyncio.to_thread(self.github_trending.fetch_ranked, limit=6)
+            selected = []
+            for item in candidates:
+                if not bool(inputs.get('force', False)) and await self.store.github_trending_seen(item['full_name']):
+                    logger.info('GITHUB_TRENDING_SKIPPED_DUPLICATE repo=%s rank=%s', item['full_name'], item['rank'])
+                    continue
+                metadata = await asyncio.to_thread(self.github_trending.fetch_metadata, item)
+                if metadata is None:
+                    logger.warning('GITHUB_TRENDING_METADATA_FAILED repo=%s rank=%s', item['full_name'], item['rank'])
+                    continue
+                selected.append(metadata)
+                if len(selected) >= 1:
+                    break
+            if not selected:
+                logger.info('GITHUB_TRENDING_NO_CHANGE job_id=%s', job.get('job_id', '-'))
+                return ''
+            self._github_pending[str(job.get('job_id', '-'))] = selected
+            reports = [await render_github_digest_with_router(item, self.router) for item in selected]
+            return '\n\n'.join(reports)
         if template in {'ai_news', 'daily_news', 'war_news', 'search_digest'}:
             if self.web is None:
                 return f"📰 {TEMPLATE_REGISTRY[template].title}: provider داخلی برای این اجرا پیکربندی نشده است."
@@ -399,6 +427,9 @@ class TemplateJobService:
                 result = await self._execute_template(job); finished = _now(); duration = max(0,(finished-started)*1000)
                 if result and deliver is not None:
                     await deliver(job, result)
+                    if job['template_id'] == 'github_trending_digest':
+                        for item in self._github_pending.pop(str(job['job_id']), []):
+                            await self.store.github_trending_mark(item['full_name'], rank=item['rank'], fingerprint=item['fingerprint'], source_url=SOURCE_URL)
                 schedule = json.loads(job['schedule_json']); nxt = _next_run(schedule, max(now, job['next_run_at']))
                 async with self.store._lock:
                     with self.store._conn() as conn:

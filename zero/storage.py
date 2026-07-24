@@ -259,6 +259,16 @@ CREATE TABLE IF NOT EXISTS cron_runs (
   UNIQUE(job_id, scheduled_for)
 );
 CREATE INDEX IF NOT EXISTS idx_cron_runs_job ON cron_runs(job_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS github_trending_items (
+  repo_full_name TEXT PRIMARY KEY,
+  last_seen_rank INTEGER NOT NULL DEFAULT 0,
+  last_seen_fingerprint TEXT NOT NULL DEFAULT '',
+  last_introduced_at INTEGER,
+  intro_count INTEGER NOT NULL DEFAULT 0,
+  last_source_url TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cron_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL,
@@ -638,6 +648,29 @@ class ZeroStore:
                 if name not in recent_columns:
                     conn.execute(f'ALTER TABLE recent_messages ADD COLUMN {name} {definition}')
             conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_recent_messages_telegram_scope ON recent_messages(platform,account_scope,chat_id,telegram_message_id) WHERE telegram_message_id IS NOT NULL')
+
+    async def github_trending_seen(self, repo_full_name: str) -> bool:
+        async with self._lock:
+            with self._conn() as conn:
+                return conn.execute('SELECT 1 FROM github_trending_items WHERE repo_full_name=? AND last_introduced_at IS NOT NULL', (repo_full_name,)).fetchone() is not None
+
+    async def github_trending_mark(self, repo_full_name: str, *, rank: int, fingerprint: str, source_url: str) -> None:
+        now = int(time.time())
+        async with self._lock:
+            with self._conn() as conn:
+                conn.execute('''INSERT INTO github_trending_items(repo_full_name,last_seen_rank,last_seen_fingerprint,last_introduced_at,intro_count,last_source_url,created_at,updated_at)
+                    VALUES(?,?,?,?,1,?,?,?)
+                    ON CONFLICT(repo_full_name) DO UPDATE SET last_seen_rank=excluded.last_seen_rank,last_seen_fingerprint=excluded.last_seen_fingerprint,last_introduced_at=excluded.last_introduced_at,intro_count=github_trending_items.intro_count+1,last_source_url=excluded.last_source_url,updated_at=excluded.updated_at''', (repo_full_name, int(rank), fingerprint, now, source_url, now, now))
+                conn.commit()
+
+    async def github_trending_seen_only(self, repo_full_name: str, *, rank: int, fingerprint: str, source_url: str) -> None:
+        now = int(time.time())
+        async with self._lock:
+            with self._conn() as conn:
+                conn.execute('''INSERT INTO github_trending_items(repo_full_name,last_seen_rank,last_seen_fingerprint,last_source_url,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(repo_full_name) DO UPDATE SET last_seen_rank=excluded.last_seen_rank,last_seen_fingerprint=excluded.last_seen_fingerprint,last_source_url=excluded.last_source_url,updated_at=excluded.updated_at''', (repo_full_name, int(rank), fingerprint, source_url, now, now))
+                conn.commit()
 
     async def panel_list_chats(self, *, query: str = '', chat_id: int | None = None, sender_id: int | None = None, page: int = 1, size: int = 25) -> dict[str, Any]:
         """Bounded read-only panel view over retained conversations."""

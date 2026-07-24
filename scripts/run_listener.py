@@ -91,7 +91,7 @@ async def main() -> None:
     office_repository = OfficeRepository(config.memory.db_path) if config.office.enabled else None
     office_bridge = None
     office_planning = office_repair = office_delivery = office_review = None
-    jobs = TemplateJobService(store, config, web=web, knowledge=knowledge, summary_builder=brain.build_daily_summary)
+    jobs = TemplateJobService(store, config, web=web, knowledge=knowledge, summary_builder=brain.build_daily_summary, router=router)
     await client.connect()
     if not await client.is_user_authorized():
         logger.error('LISTENER_AUTH_FAILED error=telegram session is not authorized')

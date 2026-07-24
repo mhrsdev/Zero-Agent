@@ -31,7 +31,7 @@ class SearXNGProvider(SearchProvider):
         payload = await self.transport.get_text(url, self.timeout, 2_000_000)
         data = json.loads(payload)
         results: list[SearchResult] = []
-        for item in data.get('results', [])[:self.max_results]:
+        for item in data.get('results', []):
             item_engines = set(item.get('engines') or [item.get('engine') or ''])
             if self.engines and not item_engines.intersection(self.engines):
                 continue
@@ -48,6 +48,8 @@ class SearXNGProvider(SearchProvider):
                 provider=self.name,
                 metadata={'engine': str(item.get('engine') or next(iter(item_engines), ''))[:80]},
             ))
+            if len(results) >= self.max_results:
+                break
         return results
 
 
