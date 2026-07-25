@@ -52,5 +52,16 @@
     "production_changed": false,
     "main_changed": false,
     "next": "direct V1-to-V3 migration contract"
+  },
+  {
+    "milestone": "direct-v1-to-v3-contract",
+    "status": "PARTIAL",
+    "commit": "pending",
+    "changes": ["direct long_term_memory mapper", "backup SHA-256 precondition", "dry-run/apply/verify/rollback API", "quarantine", "idempotent run map", "fault-injected interruption resume"],
+    "tests": ["migration contract: 1 passed", "full: 589 passed, 1 skipped", "CLI help: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "remaining V1 tables and complete source/target reporting are not yet mapped",
+    "next": "inventory and map remaining approved V1 tables directly into V3"
   }
 ]

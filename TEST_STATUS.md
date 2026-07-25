@@ -2,10 +2,11 @@
 
 - Branch: `open-source/v0.1-transformation`
 - Checkpoint: `a58c83b`
-- Full regression after current slice: `588 passed, 1 skipped`
+- Full regression after current slice: `589 passed, 1 skipped`
 - Targeted MemoryService contract: passed
 - Targeted CLI contract: passed
 - Targeted V3-only prompt/runtime regressions: `8 passed`
+- Direct V1→V3 migration contract: `1 passed`
 - Changed-module `py_compile`: passed
 - Compile status: existing compile checks passed at prior checkpoint
 

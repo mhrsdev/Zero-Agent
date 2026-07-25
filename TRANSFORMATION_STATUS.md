@@ -4,7 +4,7 @@
 - Current HEAD: `a58c83b` (`feat: enforce memory v3-only normal runtime`)
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
 - Current milestone: Memory V3-only migration contract
-- Latest full suite: `588 passed, 1 skipped`
+- Latest full suite: `589 passed, 1 skipped`
 - Initial reconstruction found an unfinished dirty Memory V3 slice; it is now ready for commit.
 - Production migration: not started
 - Public publication: not authorized
@@ -19,6 +19,7 @@
 - Initial MemoryService boundary backed by Memory V3.
 - Zero CLI entrypoint with version, status and config inspection.
 - Memory V3-only normal prompt retrieval regression and canonical V3 monthly-summary write path.
+- Direct V1→V3 migration contract foundation for `long_term_memory` with backup proof, quarantine, resume, verification and rollback.
 
 ## Active blockers
 
