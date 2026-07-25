@@ -1,10 +1,10 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD: `4b15d19` (`feat: add direct v1 to v3 migration contract`)
+- Current HEAD: `57f2693` (`feat: add release infrastructure and hardening`)
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
-- Current milestone: Memory V3-only migration contract
-- Latest full suite: `589 passed, 1 skipped`
+- Current milestone: Opus checkpoint reconciliation and release infrastructure
+- Latest full suite: `650 passed, 1 skipped`
 - Initial reconstruction found an unfinished dirty Memory V3 slice; it is now ready for commit.
 - Production migration: not started
 - Public publication: not authorized
@@ -19,16 +19,16 @@
 - Initial MemoryService boundary backed by Memory V3.
 - Zero CLI entrypoint with version, status and config inspection.
 - Memory V3-only normal prompt retrieval regression and canonical V3 monthly-summary write path.
-- Direct V1→V3 migration contract foundation for `long_term_memory` with backup proof, quarantine, resume, verification and rollback.
+- Direct V1→V3 mapping for `long_term_memory`, `medium_term_memory` and `semantic_user_memory` with backup proof, quarantine, resume, verification and rollback.
+- Opus tenancy primitives and provider registry integrated; release infrastructure, Docker/CI definitions, SBOM generator, Apache-2.0 notices and lockfile added.
 
 ## Active blockers
 
 - Canonical config is not yet connected to every composition root.
-- Existing panel setup persistence has not yet been migrated to symbolic refs.
 - Direct V1→V3 migration remains incomplete; normal prompt retrieval is now V3-only.
 - Memory V2 remains outside the public-release boundary and requires active-surface removal.
 - Multi-Group, Telegram modes, provider abstraction, Admin API, panel, TUI and Docker remain incomplete.
-- Public artifact, license, dependency, SBOM and Community E2E gates remain open.
+- Public release-tree scan, dependency audit, SBOM JS coverage and Community E2E gates remain open.
 
 ## Safety
 
@@ -36,4 +36,4 @@ No production service, database, session, credential, queue, main branch or publ
 
 ## Next
 
-Implement the direct V1→V3 migration contract: backup precondition, dry-run, run map, quarantine, interruption resume, verification and scoped rollback. Do not apply it to production.
+Complete P0-1: bind the listener request path to tenancy, remove `groups[0]`, and prove two-group routing/cooldown isolation. Do not touch production.

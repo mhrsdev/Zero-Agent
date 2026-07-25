@@ -85,5 +85,30 @@
     "main_changed": false,
     "known_gap": "remaining approved V1 tables and complete source/target reporting are not mapped",
     "next": "await correct Opus checkpoint comparison"
+  },
+  {
+    "milestone": "opus-checkpoint-reconciliation",
+    "status": "PARTIAL",
+    "commit": "57f2693",
+    "changes": [
+      "integrated scoped tenancy registry primitives with real-path adaptation",
+      "integrated provider registry primitives",
+      "integrated Docker/CI/SBOM/licensing/lockfile release infrastructure",
+      "updated planning and tracking documents to real repository evidence"
+    ],
+    "tests": [
+      "tenancy targeted: 32 passed",
+      "provider targeted: 24 passed",
+      "full: 650 passed, 1 skipped",
+      "compileall: passed",
+      "diff-check: passed"
+    ],
+    "rejected": [
+      "Opus release-artifact test: assumes sanitized public tree and fails against real private repository; not weakened or included"
+    ],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "tenancy and provider primitives are not yet wired into production call graphs",
+    "next": "P0-1 listener tenancy binding and group isolation"
   }
 ]
