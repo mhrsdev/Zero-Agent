@@ -4,10 +4,10 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `8039e9e` (`feat: migrate medium-term memory directly to v3`)
+- HEAD: `29c995a` (`feat: migrate semantic memory directly to v3`)
 - Baseline/main: `f9588ec6588299a04d29561c9b4c8415c54e9507`; main was not changed
 - Working tree: clean at checkpoint creation after the tracking commit below
-- Full tests: `590 passed, 1 skipped`
+- Full tests: `591 passed, 1 skipped`
 - Migration contract test: `1 passed`
 - Changed-module compile and migration CLI help: passed
 - Production services/databases/sessions/credentials/systemd units: not modified or restarted
@@ -27,8 +27,9 @@
   - pre-existing V3 preservation;
   - fault-injected interruption and resume;
   - scoped soft-delete rollback.
-- Direct mapping now also covers approved `medium_term_memory` rows with group scope,
-  participant provenance, source-message provenance, quarantine, resume and rollback.
+- Direct mapping covers approved `medium_term_memory` rows with group scope,
+  participant/source-message provenance, and approved `semantic_user_memory` rows as
+  personal scoped items with identity/value/evidence provenance; ambiguous rows are quarantined.
 - Tests and tracking are committed; the migration is explicitly partial and has not touched production.
 
 ## Remaining incomplete work
@@ -45,8 +46,10 @@
 
 ## First next atomic action
 
-Read all V1 source schemas in `zero/storage.py` and existing migration helpers,
-then add a RED test for the next approved table (`semantic_user_memory`) through the same direct V1→V3 run map. Preserve the backup precondition, quarantine ambiguous rows, pre-existing V3 rows, interruption resume, verification and rollback. Do not route through V2 and do not apply to production.
+Do not start a new transformation milestone from this older checkpoint until the
+correct Opus package is explicitly accepted and compared against this branch.
+The next session must inspect the supplied planning documents and commit range
+before integrating any newer work. Do not apply migrations to production.
 
 Relevant files:
 

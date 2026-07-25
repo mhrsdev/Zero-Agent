@@ -74,5 +74,16 @@
     "main_changed": false,
     "known_gap": "semantic/profile/notes, social state, RAG/archive and other approved V1 sources remain unmapped",
     "next": "direct semantic_user_memory mapping"
+  },
+  {
+    "milestone": "direct-v1-to-v3-semantic",
+    "status": "PARTIAL",
+    "commit": "29c995a",
+    "changes": ["direct semantic_user_memory mapper", "personal identity/value/evidence provenance", "invalid JSON and ambiguous identity quarantine"],
+    "tests": ["migration contract: 3 passed", "full: 591 passed, 1 skipped", "diff-check: passed", "compileall: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "remaining approved V1 tables and complete source/target reporting are not mapped",
+    "next": "await correct Opus checkpoint comparison"
   }
 ]
