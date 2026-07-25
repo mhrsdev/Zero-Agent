@@ -2,7 +2,7 @@
 
 ## Open
 
-- Canonical configuration composition-root integration
+- Canonical configuration composition-root integration (runtime validation boundary completed; shared setup write-through remains open)
 - Shared SetupService replacing panel setup credential persistence
 - Memory V3-only runtime cutover
 - Direct V1→V3 migration with quarantine, resume, verification and rollback

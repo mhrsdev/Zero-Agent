@@ -4,9 +4,9 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `41339ae46174691dc6de8984f2a90199161f0c67`
+- HEAD: `9ff6a56816d31c80c1f1dfcf354e9ddd223aa429`
 - Working tree: clean at checkpoint creation
-- Latest full test result: `582 passed, 1 skipped`
+- Latest full test result: `585 passed, 1 skipped`
 - Production and `main`: untouched
 
 ## Completed; do not repeat
@@ -28,14 +28,10 @@ Commits relevant to this transformation:
 
 ## First next action
 
-Inspect and connect `zero.configuration.ConfigStore` and `SetupService` to the real composition roots:
-
-1. listener config loading
-2. panel backend/setup persistence
-3. current CLI
-4. management bot/worker construction
-
-Add failing tests first for shared path resolution, restart persistence, legacy-config dry-run conversion, and rejection of raw credentials. Implement the smallest compatibility adapter; do not mutate production files or services.
+Complete the shared setup integration boundary: pass `ConfigStore`/`SetupService`
+into `PanelStore`/`PanelAPI`, make Telegram setup write only symbolic refs to
+canonical config, and add tests proving panel setup reloads the same config used
+by runtime roots. Then begin the V3-only migration contract.
 
 ## Current unfinished work
 

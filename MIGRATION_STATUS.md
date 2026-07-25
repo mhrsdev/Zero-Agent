@@ -2,6 +2,7 @@
 
 - Canonical target: Memory V3
 - Active stable boundary: `zero.core.memory_service.MemoryService`
+- Runtime composition roots now validate a present canonical config before legacy runtime load.
 - Current runtime: legacy V1/V3 compatibility composition remains
 - V1→V3 migration: not yet complete
 - V1 read-only cutover: not yet applied
