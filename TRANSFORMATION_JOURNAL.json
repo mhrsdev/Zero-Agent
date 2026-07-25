@@ -37,8 +37,9 @@
     "changes": ["zero version", "zero status", "zero config show"]
   },
   {
-    "checkpoint": "455ddbc",
-    "tests": ["full suite: 579 passed, 1 skipped"],
+    "checkpoint": "41339ae",
+    "tests": ["targeted config/panel/CLI: 14 passed", "full suite: 582 passed, 1 skipped"],
+    "changes": ["shared canonical config path", "config rollback backup", "panel setup secrets replaced before SQLite persistence"],
     "production_changed": false,
     "main_changed": false
   }

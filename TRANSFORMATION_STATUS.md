@@ -1,10 +1,10 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD at latest recorded checkpoint: `455ddbc69d6ffe41d33e24b7ac4f508539dc23b7`
+- Current HEAD at latest recorded checkpoint: `41339ae46174691dc6de8984f2a90199161f0c67`
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
 - Current milestone: canonical configuration integration
-- Latest full suite: `579 passed, 1 skipped`
+- Latest full suite: `582 passed, 1 skipped`
 - Working tree was clean before continuation artifacts were recorded.
 - Production migration: not started
 - Public publication: not authorized
