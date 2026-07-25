@@ -40,6 +40,31 @@ def backup_proof(source, backup):
     return hashlib.sha256(backup.read_bytes()).hexdigest()
 
 
+def medium_source_db(path):
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE medium_term_memory(
+                event_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL,
+                participants_json TEXT NOT NULL DEFAULT '[]', topic TEXT NOT NULL,
+                summary TEXT NOT NULL, source_message_ids_json TEXT NOT NULL DEFAULT '[]',
+                importance REAL NOT NULL, confidence REAL NOT NULL,
+                occurred_at INTEGER NOT NULL, last_referenced_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL, promotion_candidate INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active', revision INTEGER NOT NULL DEFAULT 1
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO medium_term_memory VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("event-1", -200, "[7, 8]", "release", "synthetic checkpoint", "[21]", .7, .8, 2, 3, 999, 0, "active", 1),
+        )
+        db.execute(
+            "INSERT INTO medium_term_memory VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("event-ambiguous", -200, "not-json", "release", "", "[]", .7, .8, 2, 3, 999, 0, "active", 1),
+        )
+
+
 def test_direct_v1_to_v3_dry_run_apply_verify_and_rollback(tmp_path):
     source = tmp_path / "v1.db"
     target = tmp_path / "v3.db"
@@ -72,5 +97,32 @@ def test_direct_v1_to_v3_dry_run_apply_verify_and_rollback(tmp_path):
     rolled = rollback_v1_to_v3(target, "r1")
     assert rolled["soft_deleted"] == 1
     assert MemoryV3Service(str(target)).count_items() == 2
+    with sqlite3.connect(target) as db:
+        assert db.execute("SELECT count(*) FROM memory_v3_items WHERE status='active' AND content='pre-existing'").fetchone()[0] == 1
+
+
+def test_direct_medium_term_memory_mapping_quarantine_resume_and_rollback(tmp_path):
+    source = tmp_path / "v1-medium.db"
+    target = tmp_path / "v3-medium.db"
+    backup = tmp_path / "v1-medium.backup.db"
+    medium_source_db(source)
+    service = MemoryV3Service(str(target))
+    service._put_sync(MemoryV3Item.group(chat_id=-200, content="pre-existing", kind="fact"))
+
+    dry = apply_v1_to_v3(source, target, run_id="medium-r1", dry_run=True)
+    assert dry.scanned == 2 and dry.imported == 0 and dry.quarantined == 1
+    assert service.count_items() == 1
+
+    digest = backup_proof(source, backup)
+    with pytest.raises(RuntimeError, match="interrupt"):
+        apply_v1_to_v3(source, target, run_id="medium-r2", dry_run=False, backup_path=backup, backup_sha256=digest, fail_after=0)
+    resumed = apply_v1_to_v3(source, target, run_id="medium-r2", dry_run=False, backup_path=backup, backup_sha256=digest)
+    assert resumed.imported == 1 and resumed.quarantined == 1
+    assert verify_v1_to_v3(target, "medium-r2")["valid"] is True
+
+    repeated = apply_v1_to_v3(source, target, run_id="medium-r2", dry_run=False, backup_path=backup, backup_sha256=digest)
+    assert repeated.imported == 0 and repeated.quarantined == 1
+    rolled = rollback_v1_to_v3(target, "medium-r2")
+    assert rolled["soft_deleted"] == 1
     with sqlite3.connect(target) as db:
         assert db.execute("SELECT count(*) FROM memory_v3_items WHERE status='active' AND content='pre-existing'").fetchone()[0] == 1
