@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import zero.knowledge as knowledge
 from zero.knowledge import KnowledgeWorker, LocalLLMKnowledgeBackend, validate_model_output
 from zero.storage import ZeroStore
 
@@ -38,7 +39,8 @@ def test_dry_run_is_one_topic_and_does_not_store(tmp_path: Path):
     asyncio.run(scenario())
 
 
-def test_production_dedup_and_retrieval_are_separate_from_memory(tmp_path: Path):
+def test_production_dedup_and_retrieval_are_separate_from_memory(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(knowledge, "_memory_available_ok", lambda: True)
     async def scenario():
         store = ZeroStore(str(tmp_path / 'zero.db'))
         worker = KnowledgeWorker(store, FakeWeb(), FakeRouter())

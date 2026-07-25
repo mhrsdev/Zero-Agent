@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .configuration import SetupService
+
 SETUP_STEPS = (
     "welcome",
     "profile",
@@ -59,8 +61,9 @@ def _strip_secrets(value: Any) -> Any:
 
 
 class PanelStore:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, setup_service: SetupService | None = None):
         self.path = Path(path)
+        self.setup_service = setup_service
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
@@ -161,6 +164,16 @@ class PanelStore:
     def save_setup_step(self, step: str, data: dict[str, Any]) -> None:
         if step not in SETUP_STEPS:
             raise ValueError("unknown setup step")
+        if step == "telegram" and self.setup_service is not None:
+            state = self.setup_service.apply_telegram(
+                mode=data.get("mode", "disabled"),
+                bot_token_ref=data.get("bot_token_ref"),
+                api_id=data.get("api_id"),
+                api_hash_ref=data.get("api_hash_ref"),
+                session_ref=data.get("session_ref"),
+            )
+            if "telegram" not in state.completed_steps:
+                raise ValueError("telegram setup validation failed")
         with self._connect() as db:
             row = db.execute("SELECT data_json FROM panel_setup WHERE id=1").fetchone()
             current = json.loads(row["data_json"])

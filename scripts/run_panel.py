@@ -23,6 +23,7 @@ from zero.experience_memory import ExperienceMemory
 from zero.procedural_memory import ProceduralMemory
 from zero.world_model import WorldModel
 from zero.config import ZeroConfig
+from zero.configuration import ConfigStore, SetupService
 from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.logging_utils import setup_logger
 from zero.management import load_bot_token
@@ -77,7 +78,13 @@ async def main() -> None:
     panel_api = PanelAPI(
         config, store, router, bot, static_dir=ROOT / 'panel',
         services={'knowledge': knowledge, 'jobs': jobs, 'semantic': semantic, 'experience': experience, 'procedure': procedure, 'world': world},
-        panel_store=PanelStore(Path(config.memory.db_path).with_name('panel.db')),
+        panel_store=PanelStore(
+            Path(config.memory.db_path).with_name('panel.db'),
+            setup_service=SetupService(
+                ConfigStore(),
+                installation_id=os.environ.get('ZERO_INSTALLATION_ID', 'local'),
+            ),
+        ),
     )
     await panel_api.start(host=os.environ.get('ZERO_PANEL_HOST', '127.0.0.1'), port=int(os.environ.get('ZERO_PANEL_PORT', '8787')))
     logger.info('ZERO_PANEL_API_STARTED host=%s port=%s', os.environ.get('ZERO_PANEL_HOST', '127.0.0.1'), os.environ.get('ZERO_PANEL_PORT', '8787'))
