@@ -12,28 +12,59 @@
       "production service state unchanged",
       "no Telegram/provider calls"
     ],
-    "rollback_point": "/root/zero-recovery/phase0-20260725T072202Z",
-    "known_issues": [
-      "previous backup/archive contents were inventoried as metadata only",
-      "no runtime adapter was started during restore rehearsal"
-    ]
+    "rollback_point": "/root/zero-recovery/phase0-20260725T072202Z"
   },
   {
     "phase": 1,
-    "status": "IN_PROGRESS",
-    "commit": null,
+    "status": "PASS",
+    "commit": "23f1a08",
     "changes": [
-      "docs/public-private-boundary.md",
-      "docs/public-release-artifact-policy.md",
-      "scripts/verify_public_artifact.py",
-      "TRANSFORMATION_STATUS.md",
-      "TRANSFORMATION_JOURNAL.json"
+      "public/private boundary policy",
+      "public release artifact policy",
+      "fail-closed release scanner",
+      "transformation/release/migration/security tracking files",
+      "release-related .gitignore hardening"
     ],
     "schema_changes": [],
-    "tests": [],
+    "tests": [
+      "clean artifact fixture: 0 findings",
+      "unsafe artifact fixture: fail-closed with 2 findings",
+      "full suite: 568 passed, 1 skipped"
+    ],
     "rollback_point": "f9588ec6588299a04d29561c9b4c8415c54e9507",
     "known_issues": [
-      "current tree is intentionally not a release candidate"
+      "current repository tree is intentionally not a release candidate"
     ]
+  },
+  {
+    "phase": 2,
+    "status": "PASS",
+    "commit": "f81bc8f",
+    "changes": [
+      "zero/core/context.py",
+      "zero/core/__init__.py",
+      "zero/models.py",
+      "scripts/run_listener.py",
+      "tests/test_request_context.py"
+    ],
+    "schema_changes": [],
+    "tests": [
+      "RequestContext targeted: 4 passed",
+      "compileall: passed",
+      "full suite: 572 passed, 1 skipped"
+    ],
+    "rollback_point": "23f1a08",
+    "known_issues": [
+      "context propagation beyond the listener/IncomingMessage boundary remains to be completed"
+    ]
+  },
+  {
+    "phase": 3,
+    "status": "IN_PROGRESS",
+    "commit": null,
+    "changes": [],
+    "schema_changes": [],
+    "tests": [],
+    "rollback_point": "f81bc8f"
   }
 ]

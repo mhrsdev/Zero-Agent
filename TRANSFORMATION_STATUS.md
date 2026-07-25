@@ -2,7 +2,7 @@
 
 - Current branch: `open-source/v0.1-transformation`
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
-- Current phase: Phase 1 — public/private boundary
+- Current phase: Phase 3 — canonical configuration
 - Production migration: not started
 - Public publication: not authorized
 - Git history rewrite: not started
@@ -17,13 +17,15 @@
 - No Telegram/provider calls occurred.
 - Production service state remained unchanged.
 - Transformation branch created.
-- Public/private boundary policy added.
-- Public release artifact policy added.
-- Fail-closed artifact scanner added.
+- Phase 1 public/private boundary policy and release denylist added.
+- Fail-closed artifact scanner added and fixture-tested.
+- Phase 2 immutable `RequestContext` added.
+- Listener adapter now attaches context to incoming messages.
+- Full repository suite: `572 passed, 1 skipped`.
 
 ## Active blockers
 
-- Apache-2.0 license replacement is prepared but not yet authorized as a
+- Apache-2.0 license replacement is prepared but not authorized as a
   licensing/publication action.
 - Git unreachable objects require review before any history rewrite.
 - Current README and docs still describe proprietary/private behavior.
@@ -33,5 +35,6 @@
 
 ## Next
 
-Complete Phase 1 scanner and boundary tests, then proceed to architecture and
-configuration work on this branch. Do not touch production runtime.
+Build the strict typed configuration and shared setup service without touching
+production runtime. Keep existing config loading available until the new
+service has tests and a reversible migration path.
