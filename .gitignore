@@ -2,10 +2,19 @@
 .env
 .env.*
 !.env.example
+.env.local
+.env.production
 config/zero.yaml
 config/*secret*
 config/*secrets*
+*.secret
 runtime/
+
+# Release workspaces and deployment data
+release/
+public-release/
+.zero-public/
+docker-data/
 
 # User data, memory, sessions, logs and generated state
 *.db

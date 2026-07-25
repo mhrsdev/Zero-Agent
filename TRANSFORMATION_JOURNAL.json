@@ -1,0 +1,39 @@
+[
+  {
+    "phase": 0,
+    "status": "PASS",
+    "commit": "f9588ec6588299a04d29561c9b4c8415c54e9507",
+    "changes": [],
+    "schema_changes": [],
+    "tests": [
+      "encrypted allowlist archive created",
+      "5 restored SQLite databases passed PRAGMA integrity_check",
+      "290 restored source archive members",
+      "production service state unchanged",
+      "no Telegram/provider calls"
+    ],
+    "rollback_point": "/root/zero-recovery/phase0-20260725T072202Z",
+    "known_issues": [
+      "previous backup/archive contents were inventoried as metadata only",
+      "no runtime adapter was started during restore rehearsal"
+    ]
+  },
+  {
+    "phase": 1,
+    "status": "IN_PROGRESS",
+    "commit": null,
+    "changes": [
+      "docs/public-private-boundary.md",
+      "docs/public-release-artifact-policy.md",
+      "scripts/verify_public_artifact.py",
+      "TRANSFORMATION_STATUS.md",
+      "TRANSFORMATION_JOURNAL.json"
+    ],
+    "schema_changes": [],
+    "tests": [],
+    "rollback_point": "f9588ec6588299a04d29561c9b4c8415c54e9507",
+    "known_issues": [
+      "current tree is intentionally not a release candidate"
+    ]
+  }
+]
