@@ -4,10 +4,10 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `4b15d19` (`feat: add direct v1 to v3 migration contract`)
+- HEAD: `8039e9e` (`feat: migrate medium-term memory directly to v3`)
 - Baseline/main: `f9588ec6588299a04d29561c9b4c8415c54e9507`; main was not changed
 - Working tree: clean at checkpoint creation after the tracking commit below
-- Full tests: `589 passed, 1 skipped`
+- Full tests: `590 passed, 1 skipped`
 - Migration contract test: `1 passed`
 - Changed-module compile and migration CLI help: passed
 - Production services/databases/sessions/credentials/systemd units: not modified or restarted
@@ -27,11 +27,13 @@
   - pre-existing V3 preservation;
   - fault-injected interruption and resume;
   - scoped soft-delete rollback.
+- Direct mapping now also covers approved `medium_term_memory` rows with group scope,
+  participant provenance, source-message provenance, quarantine, resume and rollback.
 - Tests and tracking are committed; the migration is explicitly partial and has not touched production.
 
 ## Remaining incomplete work
 
-1. Extend direct mapping to every approved V1 table after live schema inventory (`medium_term_memory`, semantic/profile/notes, social state, RAG/archive policy, and any other approved sources). Add complete source/target counts and provenance.
+1. Extend direct mapping to every approved V1 table after live schema inventory (semantic/profile/notes, social state, RAG/archive policy, and any other approved sources). Add complete source/target counts and provenance.
 2. Remove V2 from active/public runtime, setup, API, panel, TUI, config, tools and public docs while retaining safe historical artifacts.
 3. Finish canonical config conversion and prove every composition root.
 4. Implement true installation/group/membership/permission/tenant ownership and adversarial isolation.
@@ -44,11 +46,7 @@
 ## First next atomic action
 
 Read all V1 source schemas in `zero/storage.py` and existing migration helpers,
-then add a RED test for one additional approved table (start with
-`medium_term_memory`) through the same direct V1→V3 run map. Preserve the
-backup precondition, quarantine ambiguous rows, pre-existing V3 rows,
-interruption resume, verification and rollback. Do not route through V2 and do
-not apply to production.
+then add a RED test for the next approved table (`semantic_user_memory`) through the same direct V1→V3 run map. Preserve the backup precondition, quarantine ambiguous rows, pre-existing V3 rows, interruption resume, verification and rollback. Do not route through V2 and do not apply to production.
 
 Relevant files:
 

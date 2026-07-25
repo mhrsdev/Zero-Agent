@@ -62,6 +62,17 @@
     "production_changed": false,
     "main_changed": false,
     "known_gap": "remaining V1 tables and complete source/target reporting are not yet mapped",
-    "next": "inventory and map remaining approved V1 tables directly into V3"
+    "next": "direct V1-to-V3 migration contract"
+  },
+  {
+    "milestone": "direct-v1-to-v3-medium-term",
+    "status": "PARTIAL",
+    "commit": "8039e9e",
+    "changes": ["direct medium_term_memory mapper", "group-scoped participant/source provenance", "quarantine, resume and rollback coverage"],
+    "tests": ["migration contract: 2 passed", "full: 590 passed, 1 skipped", "diff-check: passed", "compileall: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "semantic/profile/notes, social state, RAG/archive and other approved V1 sources remain unmapped",
+    "next": "direct semantic_user_memory mapping"
   }
 ]
