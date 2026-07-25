@@ -16,7 +16,7 @@ from .memory_context import compose_memory_context
 from .group_context import GroupContext
 from .proactive_followups import ProactiveFollowups
 from .document_bundles import DocumentBundles
-from .memory_v3 import MemoryV3Service
+from .memory_v3 import MemoryV3Item, MemoryV3Service
 from .core.memory_service import MemoryService
 from .memory_v3.retrieval_planner import metadata as planner_metadata, parse as parse_retrieval_plan, prompt as planner_prompt, window as planner_window
 from .market_prices import BinancePriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError, TGJUWebPriceClient
@@ -263,14 +263,12 @@ class ZeroBrain:
         v3_path = os.getenv('ZERO_MEMORY_V3_DB') or os.path.join(os.path.dirname(str(store.db_path)), 'zero-memory-v3.db')
         self.memory_v3 = MemoryV3Service(v3_path)
         self.memory = MemoryService(self.memory_v3)
-        # Read-only compatibility alias for legacy test callers; production uses memory_v3.
-        self.memory_v2 = self.memory_v3
+
         self.group_context = GroupContext(store, router)
         self.proactive_followups = ProactiveFollowups(store, router, client=client)
         self.document_bundles = DocumentBundles(store)
-        # Existing V1 layers stay available during V3 migration.  The legacy
-        # V2 test/compatibility mode deliberately preserves its old cutover semantics.
-        self.v1_memory_runtime_enabled = not (self.memory_v3._legacy_compat and self.memory_v3.enabled and not self.memory_v3.shadow)
+        # V1 is migration/archive-only. Normal runtime retrieval and writes are V3-only.
+        self.v1_memory_runtime_enabled = False
         self.web = HybridWeb(config, store)
         vision_keys = getattr(router, 'gemini_keys', getattr(router, 'keys', []))
         self.vision = VisionProcessor(config, vision_keys, store)
@@ -623,7 +621,7 @@ class ZeroBrain:
                 outcome=await self.proactive_followups.consider(message)
                 await self.memory_v3.metric(message.trace_id or '-', 'proactive_followup', outcome)
         except Exception as exc:
-            logger.warning('MEMORY_V2_WRITE_FAILED trace_id=%s exception_type=%s', message.trace_id or '-', type(exc).__name__)
+            logger.warning('MEMORY_V3_WRITE_FAILED trace_id=%s exception_type=%s', message.trace_id or '-', type(exc).__name__)
         return await self._maybe_reply_with_sticker(raw, chat_id=chat_id, user_text=message.text or '')
 
     def _memory_target(self, message: IncomingMessage) -> tuple[int, str]:
@@ -634,7 +632,7 @@ class ZeroBrain:
 
     async def _planned_memory_context(self, message: IncomingMessage, trace_id: str) -> tuple[str, dict]:
         """Planner may request evidence; executor enforces chat scope and bounded reads."""
-        if os.getenv('ZERO_MEMORY_V3_PLANNER_ENABLED', os.getenv('ZERO_MEMORY_V2_PLANNER_ENABLED', 'false')).lower() != 'true': return '', {'used':False}
+        if os.getenv('ZERO_MEMORY_V3_PLANNER_ENABLED', 'false').lower() != 'true': return '', {'used':False}
         meta=planner_metadata(message); started=time.monotonic(); result=await self.router.complete(planner_prompt(message,meta),max_output_tokens=180); latency_ms=int((time.monotonic()-started)*1000)
         plan=parse_retrieval_plan(result.text,set(meta['references']))
         if not plan:
@@ -739,6 +737,7 @@ class ZeroBrain:
         logger.info('MEMORY_BUDGET_APPLIED trace_id=%s chat_id=%s short_tokens=%s medium_tokens=%s long_tokens=%s total_memory_tokens=%s dropped_count=%s final_context_ratio=%.3f', message.trace_id or '-', message.chat_id, len(' '.join(short_lines))//4, len(' '.join(medium_lines))//4, len(' '.join(long_lines))//4, len(' '.join(memory_lines))//4, dropped, min(1.0, len(' '.join(memory_lines)) / 10400))
         layered_memory_context = '\n'.join(memory_lines)
         logger.info('MEMORY_CONTEXT_BUILT trace_id=%s chat_id=%s lines=%s', message.trace_id or '-', message.chat_id, len(memory_lines))
+        memory_context = ''
         mode = await self._mode()
         clean_user_text = strip_trigger(message.text, self.config.listener.account_username)
         search_command = parse_search_command(message.text)
@@ -746,56 +745,29 @@ class ZeroBrain:
             clean_user_text = search_command[1]
         trace_id = message.trace_id or '-'
         web_context = ''
-        memory_context = layered_memory_context
         telegram_context = ''
         live_market_disclosure = ''
         market_searched_at = ''
         web_outcome = None
-        memory_plan=plan_memory(clean_user_text)
-        logger.info('MEMORY_RETRIEVAL_PLAN trace_id=%s plan=%s chat_id=%s sender_id=%s',trace_id,memory_plan,message.chat_id,message.sender_id)
-        if memory_plan=='debug':
-            debug_context = render_experience(self.experience_memory.retrieve(clean_user_text,debug=True,limit=3)) + '\n' + render_procedures([self.procedural_memory.retrieve('debug workflow')] if self.procedural_memory.retrieve('debug workflow') else [])
-            memory_context = '\n'.join(x for x in (memory_context, debug_context) if x)
-            logger.info('EXPERIENCE_MEMORY_RETRIEVED trace_id=%s debug=true',trace_id)
-        elif memory_plan=='world':
-            world_context = render_world(self.world_model.resolve_query(clean_user_text))
-            memory_context = '\n'.join(x for x in (memory_context, world_context) if x)
-            logger.info('WORLD_MODEL_RETRIEVED trace_id=%s',trace_id)
-        if self.v1_memory_runtime_enabled:
-            memory_context, memory_meta = await compose_memory_context(
-                store=self.store, semantic_memory=self.semantic_memory, message=message,
-                recent=recent, layered=layered,
-                extra_lines=[line for line in memory_lines if line.startswith(('[SHORT_MEDIA_CONTEXT]', '[SOCIAL_THREAD]', '[INSIDE_JOKE]'))],
-                v3_memory=self.memory_v3,
-            )
-        else:
-            memory_context, memory_meta = '', {'chars': 0, 'reply_chain_depth': 0, 'target_ids': [], 'ambiguous': False}
-        if self.v1_memory_runtime_enabled and memory_plan == 'debug':
-            memory_context = '\n'.join(x for x in (memory_context, debug_context) if x)
-        elif self.v1_memory_runtime_enabled and memory_plan == 'world':
-            memory_context = '\n'.join(x for x in (memory_context, world_context) if x)
-        # V2 always evaluates in shadow when enabled by environment; only active mode
-        # replaces V1 context, preventing dual memory injection.
         target_user_id, target_kind = self._memory_target(message)
-        identity_lookup=target_kind != 'speaker' and bool(re.search(r'کیه|کی هست|میشناسی|who is|who are',message.text or '',re.I))
-        planned_context, planner_meta = await self._planned_memory_context(message,trace_id)
-        if planner_meta.get('used'):
-            v2_context, v2_meta = planned_context, {'selected':planner_meta.get('selected_count',0),'tokens':len(planned_context)//4,'ids':[],'temporal_rejected':0}
-        else:
-            v2_context, v2_meta = await self.memory_v3.context(message, target_user_id=target_user_id, identity_lookup=identity_lookup)
-        if v2_context and target_kind != 'speaker': v2_context = f'Retrieval target: {target_kind}; do not attribute these facts to the current speaker.\n' + v2_context
-        await self.memory_v3.metric(trace_id, 'shadow' if self.memory_v3.shadow else 'active', {
-            'v1_memory_tokens': len(memory_context) // 4, 'v2_selected_items': v2_meta.get('selected', 0),
-            'v2_selected_tokens': v2_meta.get('tokens', 0), 'temporal_rejected':v2_meta.get('temporal_rejected',0), 'target_kind':target_kind, 'target_is_speaker':target_kind=='speaker', 'planner_used':planner_meta.get('used',False), 'planner_success':planner_meta.get('success',False), 'plan_version':1 if planner_meta.get('used') else 0, 'operation':planner_meta.get('operation',''), 'actor_count':planner_meta.get('actors',0), 'subject_count':planner_meta.get('subjects',0), 'unresolved_entity_count':planner_meta.get('unresolved',0), 'time_filter_kind':planner_meta.get('time',''), 'evidence_mode':planner_meta.get('evidence_mode',''), 'candidate_count':planner_meta.get('candidate_count',0), 'planner_fallback_reason':planner_meta.get('fallback',''), 'planner_latency_ms':planner_meta.get('latency_ms',0), 'context_total_tokens': (len(memory_context) + len(v2_context)) // 4,
+        identity_lookup = target_kind != 'speaker' and bool(re.search(r'کیه|کی هست|میشناسی|who is|who are', message.text or '', re.I))
+        memory_context, memory_meta = await self.memory.context(
+            message,
+            target_user_id=target_user_id,
+        )
+        if memory_context and target_kind != 'speaker':
+            memory_context = f'Retrieval target: {target_kind}; do not attribute these facts to the current speaker.\n' + memory_context
+        await self.memory.metric(trace_id, 'active', {
+            'selected_items': memory_meta.get('selected', 0),
+            'selected_tokens': memory_meta.get('tokens', 0),
+            'target_kind': target_kind,
+            'target_is_speaker': target_kind == 'speaker',
+            'context_total_tokens': len(memory_context) // 4,
         })
-        # V3 is a second, scoped source during migration; never discard existing
-        # contextual layers before their migrated equivalents are verified.
-        if self.memory_v3.enabled and not self.memory_v3.shadow and v2_context:
-            memory_context = '\n\n'.join(part for part in (memory_context, v2_context) if part)
         logger.info(
-            'MEMORY_CONTEXT_COMPOSED trace_id=%s chat_id=%s sender_id=%s chars=%s reply_chain_depth=%s target_ids=%s ambiguity=%s',
-            trace_id, message.chat_id, message.sender_id, memory_meta['chars'],
-            memory_meta['reply_chain_depth'], memory_meta['target_ids'], memory_meta['ambiguous'],
+            'MEMORY_CONTEXT_COMPOSED trace_id=%s chat_id=%s sender_id=%s chars=%s target_ids=%s',
+            trace_id, message.chat_id, message.sender_id, len(memory_context),
+            memory_meta.get('target_user_ids', []),
         )
         search_mode, search_text = search_command or ('', clean_user_text)
         deep_search = search_mode == 'deep' or is_deep_search_request(clean_user_text)
@@ -1048,12 +1020,8 @@ class ZeroBrain:
             if has_link_context and asks_about_link:
                 enriched = replace(message, text=f'{clean_user_text}\n\n[Vision Analysis: {vision_result}]')
                 return await self._handle_no_media(enriched, Decision(True, 'vision_web'), classify_intent(enriched.text, enriched.reply_text))
-            layered = await self.store.retrieve_layered_memory(message.chat_id, clean_user_text, sender_id=message.sender_id, short_limit=1, medium_limit=4, long_limit=6)
-            memory_context, memory_meta = await compose_memory_context(
-                store=self.store, semantic_memory=self.semantic_memory, message=message,
-                recent=recent, layered=layered,
-            )
-            logger.info('MEMORY_CONTEXT_COMPOSED trace_id=%s path=vision chars=%s reply_chain_depth=%s target_ids=%s ambiguity=%s', message.trace_id or '-', memory_meta['chars'], memory_meta['reply_chain_depth'], memory_meta['target_ids'], memory_meta['ambiguous'])
+            memory_context, memory_meta = await self.memory.context(message)
+            logger.info('MEMORY_CONTEXT_COMPOSED trace_id=%s path=vision chars=%s selected=%s', message.trace_id or '-', len(memory_context), memory_meta.get('selected', 0))
             mode = await self._mode()
             prompt = build_reply_prompt(
                 self.config, mode=mode, sender_label=message.sender_label,
@@ -1084,6 +1052,11 @@ class ZeroBrain:
             sender_display_name=message.sender_display_name, trace_id=message.trace_id,
         )
         await self.memory_v3.record_message(message, role=effective_role)
+        if role == 'user' and not message.sender_is_bot:
+            await self.store.upsert_profile(
+                message.chat_id, message.sender_id, message.sender_label,
+                username=message.sender_username, display_name=message.sender_display_name,
+            )
         if os.getenv('ZERO_GROUP_DOCUMENT_BUNDLING_ENABLED','false').lower()=='true' and role=='user' and not message.sender_is_bot:
             await self.document_bundles.observe(message)
         if os.getenv('ZERO_PROACTIVE_FOLLOWUP_ENABLED','false').lower()=='true' and role=='user' and not message.sender_is_bot:
@@ -1093,11 +1066,6 @@ class ZeroBrain:
         # Recent rows are an archive/ephemeral turn buffer, not V1 memory injection.
         if not self.v1_memory_runtime_enabled:
             return
-        if role == 'user' and not message.sender_is_bot:
-            await self.store.upsert_profile(
-                message.chat_id, message.sender_id, message.sender_label,
-                username=message.sender_username, display_name=message.sender_display_name,
-            )
         if message.media_type and message.message_id:
             await self.store.record_media_context(message.chat_id, message.message_id, message.sender_id, message.media_type, message.media_caption, message.reply_to_message_id)
             logger.info('MEMORY_SHORT_DETAIL_UPDATED trace_id=%s chat_id=%s message_id=%s media_type=%s', message.trace_id or '-', message.chat_id, message.message_id, message.media_type)
@@ -1209,19 +1177,18 @@ class ZeroBrain:
         # LLM replies are not trusted memory commands and are never persisted as memory.
 
     async def build_monthly_group_memory(self, chat_id: int) -> dict[str, Any]:
-        if not self.v1_memory_runtime_enabled:
-            return {'status': 'v1_memory_disabled'}
         since = int(time.time()) - 30 * 86400
         summary = await self.build_daily_summary(chat_id, since_ts=since)
         period = await self.store.build_period_summary(chat_id, days=30, label='monthly_group')
         if not summary or 'پاسخ‌گویی در دسترس نیست' in summary or 'PROVIDERS_FAILED' in summary:
-            return await self.store.update_monthly_group_memory(chat_id, actor_user_id=self.config.owner_user_id)
-        try:
-            memory_id = await self.store.add_long_memory(chat_id, 'group_monthly_summary', summary, created_by=self.config.owner_user_id, subject_user_id=None, source_message_ids=period.get('source_message_ids', []), confidence=.95)
-        except ValueError:
-            logger.warning('MONTHLY_GROUP_SUMMARY_REJECTED chat_id=%s reason=unsafe_summary_fallback', chat_id)
-            return await self.store.update_monthly_group_memory(chat_id, actor_user_id=self.config.owner_user_id)
-        return {'memory_id': memory_id, 'summary': summary, **period}
+            return {'status': 'summary_unavailable', **period}
+        item_id = await self.memory.put(MemoryV3Item.group(
+            chat_id=chat_id, content=summary, kind='group_monthly_summary',
+            importance=.85, confidence=.95,
+            source_message_ids=tuple(period.get('source_message_ids', [])),
+            metadata={'period': '30d', 'source_count': period.get('source_count', 0)},
+        ))
+        return {'memory_id': item_id, 'summary': summary, **period}
 
     async def build_daily_summary(self, chat_id: int, *, since_ts: int | None = None) -> str:
         recent = (

@@ -18,6 +18,13 @@
 - Apache-2.0 release tree and third-party notices
 - Community E2E and release artifacts
 
+## Closed in current slice
+
+- Normal brain and vision prompt memory retrieval uses the canonical V3 boundary.
+- V2 environment flags no longer control V3 runtime behavior.
+- Normal V1 runtime flag is disabled.
+- Group monthly summaries write to V3 rather than V1 long-term memory.
+
 ## Safety gates not executed
 
 - production migration

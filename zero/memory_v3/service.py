@@ -69,11 +69,10 @@ class MemoryV3Service:
         self.path = Path(path or os.getenv("ZERO_MEMORY_V3_DB", "/root/zero/runtime/state/zero-memory-v3.db"))
         self.max_items = int(os.getenv("ZERO_MEMORY_V3_MAX_ITEMS", "8"))
         self.max_tokens = int(os.getenv("ZERO_MEMORY_V3_MAX_TOKENS", "1200"))
-        self._legacy_compat = "ZERO_MEMORY_V2_ENABLED" in os.environ or "ZERO_MEMORY_V2_SHADOW" in os.environ
-        self.enabled = os.getenv("ZERO_MEMORY_V3_ENABLED", os.getenv("ZERO_MEMORY_V2_ENABLED", "true")).lower() == "true"
-        self.shadow = os.getenv("ZERO_MEMORY_V3_SHADOW", os.getenv("ZERO_MEMORY_V2_SHADOW", "false")).lower() == "true"
-        self.read_enabled = os.getenv("ZERO_MEMORY_V3_READ_ENABLED", os.getenv("ZERO_MEMORY_V2_READ_ENABLED", "true")).lower() == "true"
-        self.write_enabled = os.getenv("ZERO_MEMORY_V3_WRITE_ENABLED", os.getenv("ZERO_MEMORY_V2_WRITE_ENABLED", "true")).lower() == "true"
+        self.enabled = os.getenv("ZERO_MEMORY_V3_ENABLED", "true").lower() == "true"
+        self.shadow = os.getenv("ZERO_MEMORY_V3_SHADOW", "false").lower() == "true"
+        self.read_enabled = os.getenv("ZERO_MEMORY_V3_READ_ENABLED", "true").lower() == "true"
+        self.write_enabled = os.getenv("ZERO_MEMORY_V3_WRITE_ENABLED", "true").lower() == "true"
         self.healthy = True
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +177,7 @@ class MemoryV3Service:
         return " ".join((text or "").casefold().split())
 
     def _put_sync(self, item: MemoryV3Item) -> str:
-        # Temporary compatibility for existing callers/tests that still pass V2 MemoryItem.
+        # Migration tooling may adapt legacy records before they reach this store.
         if not isinstance(item, MemoryV3Item):
             legacy_scope = str(getattr(item, "scope", ""))
             scope = "personal" if legacy_scope in {"group_user", "private_user"} else "group" if legacy_scope == "group" else "system"

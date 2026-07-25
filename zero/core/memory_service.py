@@ -17,6 +17,9 @@ class MemoryService:
     async def context(self, message: Any, *, target_user_id: int | None = None, target_user_ids: tuple[int, ...] = ()):
         return await self.backend.context(message, target_user_id=target_user_id, target_user_ids=target_user_ids)
 
+    async def put(self, item: Any) -> str:
+        return await self.backend.put(item)
+
     async def observe(self, message: Any, reply_text: str = "") -> None:
         await self.backend.observe(message, reply_text)
 

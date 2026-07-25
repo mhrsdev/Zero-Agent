@@ -90,10 +90,6 @@ async def test_semantic_monthly_summary_replaces_deterministic_fallback(tmp_path
     cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
     store = ZeroStore(str(tmp_path / "memory.db"))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
-    await store.add_long_memory(
-        -1, "group_monthly_summary", "fallback آماری قدیمی",
-        created_by=cfg.owner_user_id, subject_user_id=None, confidence=.91,
-    )
 
     async def semantic_summary(*args, **kwargs):
         return "خلاصه معنایی تازه و معتبر گروه"
@@ -101,8 +97,13 @@ async def test_semantic_monthly_summary_replaces_deterministic_fallback(tmp_path
     monkeypatch.setattr(brain, "build_daily_summary", semantic_summary)
     await brain.build_monthly_group_memory(-1)
 
-    row = await store.find_active_long_memory(-1, "group_monthly_summary")
-    assert row["content"] == "خلاصه معنایی تازه و معتبر گروه"
+    with brain.memory_v3._conn() as conn:
+        row = conn.execute(
+            "SELECT content,kind,scope FROM memory_v3_items WHERE chat_id=? AND kind=?",
+            (-1, "group_monthly_summary"),
+        ).fetchone()
+    assert row and row["content"] == "خلاصه معنایی تازه و معتبر گروه"
+    assert row["scope"] == "group"
 
 
 @pytest.mark.asyncio

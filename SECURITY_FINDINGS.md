@@ -19,8 +19,8 @@ Values are intentionally omitted. Findings identify categories and paths only.
   rewrite or publication.
 - Current README/docs contain private deployment and unsupported feature claims;
   they are documentation/release blockers, not evidence for credential exposure.
-- `panel_setup.data_json` still requires a later implementation fix so setup
-  credentials are never stored raw.
+- Panel setup credential persistence was verified in the prior setup slice; keep
+  symbolic references as the only public/config/database representation.
 
 ## Closed in Phase 0
 

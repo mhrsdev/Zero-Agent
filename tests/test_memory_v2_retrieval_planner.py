@@ -19,7 +19,7 @@ class Router:
   return RouteResult('ok','test','test',1)
 
 async def _evidence(tmp_path,monkeypatch):
- monkeypatch.setenv('ZERO_MEMORY_V2_PLANNER_ENABLED','true')
+ monkeypatch.setenv('ZERO_MEMORY_V3_PLANNER_ENABLED','true')
  cfg=ZeroConfig.load('/root/zero/config/zero.example.yaml');cfg=cfg.model_copy(update={'memory':cfg.memory.model_copy(update={'db_path':str(tmp_path/'v1.db')})})
  store=ZeroStore(cfg.memory.db_path);brain=ZeroBrain(cfg,store,Router())
  await store.append_recent(-1,2,'member','user','bounded historical statement',telegram_message_id=9)

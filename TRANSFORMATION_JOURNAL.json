@@ -42,5 +42,15 @@
     "changes": ["PanelStore accepts shared SetupService", "Telegram setup writes canonical symbolic refs", "invalid setup cannot advance", "resource-sensitive knowledge test made deterministic"],
     "production_changed": false,
     "main_changed": false
+  },
+  {
+    "milestone": "memory-v3-only-runtime",
+    "status": "PASS",
+    "commit": "pending",
+    "changes": ["normal brain and vision prompt paths retrieve through MemoryService backed by V3", "V2 environment variables cannot select the V3 runtime", "normal V1 runtime flag disabled", "monthly group summaries write canonical V3 group items", "obsolete V1/V2 shadow prompt expectations replaced with V3-only regressions"],
+    "tests": ["targeted: 8 passed", "full: 588 passed, 1 skipped", "py_compile: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "next": "direct V1-to-V3 migration contract"
   }
 ]
