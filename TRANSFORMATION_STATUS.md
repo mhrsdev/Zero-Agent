@@ -1,7 +1,7 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD: `a58c83b` (`feat: enforce memory v3-only normal runtime`)
+- Current HEAD: `4b15d19` (`feat: add direct v1 to v3 migration contract`)
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
 - Current milestone: Memory V3-only migration contract
 - Latest full suite: `589 passed, 1 skipped`

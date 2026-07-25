@@ -4,34 +4,34 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `a58c83b` (`feat: enforce memory v3-only normal runtime`)
+- HEAD: `4b15d19` (`feat: add direct v1 to v3 migration contract`)
 - Baseline/main: `f9588ec6588299a04d29561c9b4c8415c54e9507`; main was not changed
 - Working tree: clean at checkpoint creation after the tracking commit below
-- Full tests: `588 passed, 1 skipped`
-- Changed-module compile: passed
+- Full tests: `589 passed, 1 skipped`
+- Migration contract test: `1 passed`
+- Changed-module compile and migration CLI help: passed
 - Production services/databases/sessions/credentials/systemd units: not modified or restarted
-
-## Verified reconstruction
-
-- The reported `55839d6` existed, but the tree was not clean: it contained an unfinished Memory V3 prompt patch and an untracked regression.
-- The missing requested `RELEASE_CHECKLIST.md` was added.
-- Initial pre-repair suite was `586 passed, 2 failed, 1 skipped`; failures were obsolete V1/V2 shadow-prompt expectations.
-- Current suite is green at `588 passed, 1 skipped`.
-- Full matrix: `docs/FORENSIC_RECONSTRUCTION.md`.
 
 ## Completed in this slice; do not repeat
 
-- Normal `ZeroBrain` prompt retrieval now goes through `MemoryService` backed by Memory V3.
-- Vision prompt retrieval now uses the same V3 boundary.
-- Normal V1 runtime retrieval/write flag is disabled; legacy V1 storage remains for archive/migration only.
-- V2 environment variables cannot select the V3 runtime and `brain.memory_v2` is absent.
+- Forensic reconstruction and matrix: `docs/FORENSIC_RECONSTRUCTION.md`.
+- Normal `ZeroBrain` and vision prompt retrieval use `MemoryService` backed by V3.
+- Normal V1 runtime retrieval/write flag is disabled; V1 remains archive/migration material.
+- V2 environment variables cannot select V3 and `brain.memory_v2` is absent.
 - Group monthly summaries write canonical V3 group items.
-- V3-only regressions cover prompt exclusion, V2-env isolation, and V1 runtime disablement.
-- Tracking and forensic reconstruction files refreshed.
+- Direct V1→V3 migration contract foundation in `zero/memory_v3/migration.py` and `scripts/migrate_memory_v1_to_v3.py` for `long_term_memory`:
+  - dry-run/apply/verify/rollback;
+  - mandatory backup path plus SHA-256 proof for apply;
+  - stable run/source/hash mapping and idempotence;
+  - quarantine for ambiguous content/scope/source IDs;
+  - pre-existing V3 preservation;
+  - fault-injected interruption and resume;
+  - scoped soft-delete rollback.
+- Tests and tracking are committed; the migration is explicitly partial and has not touched production.
 
 ## Remaining incomplete work
 
-1. Direct V1 → V3 migration with mandatory backup, dry-run, run ID/map, validation, quarantine, interruption resume, verification, idempotence and scoped rollback.
+1. Extend direct mapping to every approved V1 table after live schema inventory (`medium_term_memory`, semantic/profile/notes, social state, RAG/archive policy, and any other approved sources). Add complete source/target counts and provenance.
 2. Remove V2 from active/public runtime, setup, API, panel, TUI, config, tools and public docs while retaining safe historical artifacts.
 3. Finish canonical config conversion and prove every composition root.
 4. Implement true installation/group/membership/permission/tenant ownership and adversarial isolation.
@@ -43,25 +43,22 @@
 
 ## First next atomic action
 
-Inventory the existing V1 tables and schemas from `zero/storage.py` and the
-legacy migration helpers, then write a failing isolated test for a **direct**
-V1→V3 dry-run/apply contract. The test must include one valid scoped record,
-one ambiguous record that is quarantined rather than guessed, one pre-existing
-V3 row that survives, and a stable run ID/map. Do not use V2 as an intermediate
-target. Do not touch production databases.
+Read all V1 source schemas in `zero/storage.py` and existing migration helpers,
+then add a RED test for one additional approved table (start with
+`medium_term_memory`) through the same direct V1→V3 run map. Preserve the
+backup precondition, quarantine ambiguous rows, pre-existing V3 rows,
+interruption resume, verification and rollback. Do not route through V2 and do
+not apply to production.
 
 Relevant files:
 
+- `zero/memory_v3/migration.py`
+- `scripts/migrate_memory_v1_to_v3.py`
 - `zero/memory_v3/service.py`
-- `zero/core/memory_service.py`
-- `zero/brain.py`
 - `zero/storage.py`
-- `scripts/migrate_memory_v1_to_v2.py` (historical shape; do not extend as the public path)
-- `scripts/migrate_memory_v3.py` (current legacy importer to audit)
-- `tests/test_memory_v3_only_prompt.py`
-- `tests/memory_v2/integration/test_shadow_prompt_e2e.py` (now V3-only behavior despite historical path)
+- `tests/test_memory_v1_to_v3_migration.py`
 - `MIGRATION_STATUS.md`
-- `docs/FORENSIC_RECONSTRUCTION.md`
+- `TRANSFORMATION_JOURNAL.json`
 
 ## Safety boundaries
 
@@ -71,7 +68,7 @@ Relevant files:
 - Never restart production or make live Telegram/provider calls.
 - Development migrations must use copied synthetic databases and restricted
   backups with integrity/hash verification.
-- Do not publish, push forcefully, rewrite history, rotate credentials, revoke
+- Do not publish, force-push, rewrite history, rotate credentials, revoke
   sessions, permanently delete V1/V2 artifacts, or change repository visibility.
 - Keep secrets redacted and symbolic references only.
 

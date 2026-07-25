@@ -56,7 +56,7 @@
   {
     "milestone": "direct-v1-to-v3-contract",
     "status": "PARTIAL",
-    "commit": "pending",
+    "commit": "4b15d19",
     "changes": ["direct long_term_memory mapper", "backup SHA-256 precondition", "dry-run/apply/verify/rollback API", "quarantine", "idempotent run map", "fault-injected interruption resume"],
     "tests": ["migration contract: 1 passed", "full: 589 passed, 1 skipped", "CLI help: passed"],
     "production_changed": false,
