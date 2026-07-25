@@ -1,7 +1,7 @@
 # Zero Test Status
 
 - Branch: `open-source/v0.1-transformation`
-- Checkpoint: `0856cc20a1da04459d822ac23d211c380fbd9628`
+- Checkpoint: `2e76dde4aa71bc5248a837dde97c58f2dcd1c436`
 - Full regression: `587 passed, 1 skipped`
 - Targeted MemoryService contract: passed
 - Targeted CLI contract: passed

@@ -1,7 +1,7 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD at latest recorded checkpoint: `0856cc20a1da04459d822ac23d211c380fbd9628`
+- Current HEAD at latest recorded checkpoint: `2e76dde4aa71bc5248a837dde97c58f2dcd1c436`
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
 - Current milestone: Memory V3-only migration contract
 - Latest full suite: `587 passed, 1 skipped`
