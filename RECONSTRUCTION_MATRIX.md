@@ -3,9 +3,9 @@
 Evidence-based state of all 35 subsystems, reconstructed from Git, source and
 tests rather than from tracking-file claims.
 
-- Reconciled at: `57f2693` on `open-source/v0.1-transformation`
+- Reconciled at: `bb8d56d` on `open-source/v0.1-transformation`
 - Working tree: clean
-- Suite: `650 passed, 1 skipped, 0 failed, 0 collection errors`
+- Suite: `652 passed, 1 skipped, 0 failed, 0 collection errors`
 - `ruff check zero scripts tests`: not run; `ruff` unavailable on the real host
 - `compileall zero scripts`: exit 0
 - source-tree artifact scan: not a valid public-release result because private historical files remain
@@ -36,8 +36,8 @@ Three prior entries overstated completion. Verified here and corrected:
 | 4 | Memory V3 runtime | COMPLETE | `zero/core/memory_service.py`, `zero/memory_v3/`; `tests/test_memory_v3_only_prompt.py`, `test_memory_service_contract.py` | V3 is the only normal write/read/prompt source |
 | 5 | V1→V3 migration | PARTIAL | `zero/memory_v3/migration.py` maps `long_term_memory`, `medium_term_memory`, `semantic_user_memory`; migration tests pass | Remaining approved V1 tables unmapped: `memory_items`, `user_profiles`, `user_profiles_scoped`, `memory_rag_documents`, `memory_audit`, `memory_revisions`, `social_*` |
 | 6 | Memory V2 retirement | COMPLETE | Module unimportable; guard test in `tests/test_memory_v3.py` scans `zero/` and `scripts/` | — |
-| 7 | Multi-Group tenancy | PARTIAL | `zero/tenancy/` (559 lines); `tests/test_tenancy_isolation.py` (28) | **Dormant.** No production `bind()`; registry never instantiated outside tests |
-| 8 | Listener routing & delivery | REGRESSED (vs multi-group goal) | `scripts/run_listener.py:553,561,563,565` `groups[0]`; `run_panel.py:108,110` `[0]`; `allowed_group_ids` at 8 sites | Starter/reflection loops send to whichever group is first; global `last_starter_at`/`last_interject_at` couple all groups |
+| 7 | Multi-Group tenancy | PARTIAL | `zero/tenancy/`; `tests/test_tenancy_isolation.py` plus P0 listener guard | Listener now resolves/binds ACTIVE group scopes; jobs/files/quotas/panel are not fully scoped |
+| 8 | Listener routing & delivery | PARTIAL | `scripts/run_listener.py`, `run_panel.py`, `tests/test_p0_listener_tenancy_guard.py` | First-group routing removed and cooldown keys are group-scoped; wrong-thread and all delivery paths still need adversarial E2E |
 | 9 | Jobs, queues, outboxes | NOT STARTED (scope-wise) | `zero/office/db.py`, `zero/proactive_*.py` | No `installation_id`/`group_id` ownership columns or predicates |
 | 10 | Files & generated artifacts | NOT STARTED (scope-wise) | `zero/office/workspace.py` keys by `chat_id` only | No installation/group ownership; no cross-tenant path test |
 | 11 | Provider architecture | PARTIAL | `zero/providers/` + `tests/test_providers.py` (24) | Not wired: `zero/router.py:101,116,151,230,247` uses legacy config |

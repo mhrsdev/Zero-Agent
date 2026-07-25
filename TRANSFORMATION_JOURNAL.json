@@ -110,5 +110,28 @@
     "main_changed": false,
     "known_gap": "tenancy and provider primitives are not yet wired into production call graphs",
     "next": "P0-1 listener tenancy binding and group isolation"
+  },
+  {
+    "milestone": "p0-1-listener-tenancy-binding",
+    "status": "PARTIAL",
+    "commit": "bb8d56d",
+    "changes": [
+      "resolve and validate a group Scope per inbound listener message",
+      "bind MemoryService to the resolved scope",
+      "seed configured groups as ACTIVE tenancy records",
+      "remove first-group routing and make starter/interject cooldowns group-scoped",
+      "make panel primary-group fallback fail closed when ambiguous"
+    ],
+    "tests": [
+      "P0 targeted: 31 passed",
+      "full: 652 passed, 1 skipped",
+      "compileall: passed",
+      "diff-check: passed",
+      "source first-group guard: passed"
+    ],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "wrong-thread delivery and jobs/files/quotas/panel end-to-end scope proof remain open",
+    "next": "P0-2 runtime isolation adversarial tests and remaining delivery paths"
   }
 ]

@@ -9,7 +9,7 @@ history.
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `57f2693` (`feat: add release infrastructure and hardening`)
+- HEAD: `bb8d56d` (`feat: bind listener requests to group tenancy`)
 - Other tag: `checkpoint/v0.1-green-suite` → `74971e9` (first fully green suite)
 - Original snapshot baseline: `578b56c` (sanitized snapshot of `cf00245`)
 - Working tree: clean at this checkpoint
@@ -30,7 +30,7 @@ Release-gate extras: `ruff`, `pip-licenses`, `pip-tools`, `pip-audit`.
 ## Verified at this commit
 
 ```
-650 passed, 1 skipped, 0 failed, 0 collection errors
+652 passed, 1 skipped, 0 failed, 0 collection errors
 ```
 
 `compileall` exit 0 · `git diff --check` passed. Ruff was not installed on the
@@ -74,7 +74,7 @@ Verified false at the Opus checkpoint and still false after reconciliation:
 
 **Bind the listener to tenancy scope and delete `groups[0]`.**
 
-Confirmed against the real source at `57f2693`:
+Confirmed against the real source at `bb8d56d`:
 
 | Site | Problem |
 |---|---|
@@ -105,9 +105,9 @@ already present and are not part of P0-1.
 
 ### Acceptance
 
-No `groups[0]` or bare group index in `scripts/`, enforced by the guard test;
-full suite green; the tenancy tests now exercise the runtime rather than only
-the module.
+No `groups[0]` or bare group index remains in the listener/panel source; full
+suite is green. Runtime call-graph E2E for wrong-thread delivery and all
+stateful subsystems is still open, so this task remains PARTIAL.
 
 ### Rollback
 
