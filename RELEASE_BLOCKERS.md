@@ -1,39 +1,27 @@
 # Release Blockers
 
-This file is a living release gate. A blocker may be closed only with direct
-verification evidence and a recorded commit/phase.
+## Open
 
-## Current blockers
+- Canonical configuration composition-root integration
+- Shared SetupService replacing panel setup credential persistence
+- Memory V3-only runtime cutover
+- Direct V1→V3 migration with quarantine, resume, verification and rollback
+- Memory V2 active/public surface removal
+- Multi-Group isolation
+- Normalized model providers
+- External API-only Web Search
+- Bot, User Session and Hybrid Telegram adapters
+- Canonical Admin API/authentication
+- English web panel and Zero TUI
+- Docker Compose and clean-install validation
+- CI, dependency/license audit, SBOM and security gates
+- Apache-2.0 release tree and third-party notices
+- Community E2E and release artifacts
 
-- [ ] public tree has no proprietary/private deployment artifacts;
-- [ ] Apache-2.0 license and third-party notices are ready for the licensing
-      approval gate;
-- [ ] Git reachable/unreachable object review is complete;
-- [ ] no secret-pattern finding remains in the release workspace;
-- [ ] canonical typed configuration and real setup are implemented;
-- [ ] Memory V3-only runtime is implemented and verified;
-- [ ] direct V1 → V3 migration has dry-run, quarantine, verify and rollback;
-- [ ] Memory V2 is absent from active runtime, UI, setup and docs;
-- [ ] RequestContext reaches every group-relevant stateful operation;
-- [ ] adversarial Multi-Group and thread isolation passes;
-- [ ] Bot Mode, User Session Mode and Hybrid Mode have real adapters;
-- [ ] public Web Search is external API-only;
-- [ ] Telegram Search is outside the public tree/runtime/build;
-- [ ] canonical admin auth is hardened;
-- [ ] new panel is connected to real backend contracts;
-- [ ] Zero TUI uses the shared setup/config services;
-- [ ] Docker Compose clean-host installation passes;
-- [ ] CI, dependency audit, secret scan and SBOM pass;
-- [ ] isolated Community deployment passes;
-- [ ] production migration package is prepared but not applied;
-- [ ] public publication package is prepared but not published.
+## Safety gates not executed
 
-## Irreversible gates
-
-The following require a separate final owner approval:
-
-- Git history rewrite or deletion of unreachable objects;
-- credential or Telegram session rotation/revocation;
-- permanent deletion of Memory V1/V2, logs, backups, archives or quarantine;
-- production migration or service replacement;
-- public repository/release/Docker image publication.
+- production migration
+- credential/session rotation
+- permanent deletion
+- Git history rewrite
+- public publication

@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 
-from .configuration import ConfigStore
+from .configuration import ConfigStore, canonical_config_path
 
 VERSION = "0.1.0-alpha"
 
@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
         print(VERSION)
         return 0
     if args.command == "status":
-        print(json.dumps({"version": VERSION, "config": os.getenv("ZERO_CANONICAL_CONFIG", "config/zero.json")}, indent=2))
+        print(json.dumps({"version": VERSION, "config": str(canonical_config_path())}, indent=2))
         return 0
     if args.command == "config" and args.config_command == "show":
         print(json.dumps(ConfigStore(args.path).load().model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))

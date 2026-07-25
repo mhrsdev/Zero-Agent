@@ -28,6 +28,7 @@ def test_setup_state_resumes_and_never_returns_secret_values(tmp_path: Path):
     assert state["current_step"] == "credentials"
     assert state["data"]["telegram"]["mode"] == "bot"
     assert state["data"]["telegram"]["bot_token"] == "[stored securely]"
+    assert "sensitive" not in (tmp_path / "panel.db").read_bytes().decode("utf-8", errors="ignore")
 
 
 def test_default_admin_is_forced_to_change_password(tmp_path: Path):

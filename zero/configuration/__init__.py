@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 _REF = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{2,127}$")
+
+
+def canonical_config_path(env: Mapping[str, str] | None = None) -> Path:
+    values = env if env is not None else os.environ
+    return Path(values.get("ZERO_CANONICAL_CONFIG", "config/zero.json"))
 
 
 class StrictModel(BaseModel):
@@ -42,8 +48,16 @@ class CanonicalConfig(StrictModel):
 
 
 class ConfigStore:
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None):
+        self.path = Path(path) if path is not None else canonical_config_path()
+
+    @classmethod
+    def default_path(cls) -> Path:
+        return canonical_config_path()
+
+    @staticmethod
+    def new_config(installation_id: str) -> CanonicalConfig:
+        return CanonicalConfig(installation_id=installation_id)
 
     def load(self) -> CanonicalConfig:
         return CanonicalConfig.model_validate_json(self.path.read_text(encoding="utf-8"))
@@ -58,10 +72,23 @@ class ConfigStore:
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if self.path.exists():
+                shutil.copy2(self.path, self.backup_path)
+                os.chmod(self.backup_path, 0o600)
             os.replace(temporary, self.path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    @property
+    def backup_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.bak")
+
+    def rollback(self) -> bool:
+        if not self.backup_path.exists():
+            return False
+        os.replace(self.backup_path, self.path)
+        return True
 
 
 class SetupState(StrictModel):

@@ -1,26 +1,18 @@
-# Migration Status
+# Memory Migration Status
 
-## Memory
+- Canonical target: Memory V3
+- Active stable boundary: `zero.core.memory_service.MemoryService`
+- Current runtime: legacy V1/V3 compatibility composition remains
+- V1→V3 migration: not yet complete
+- V1 read-only cutover: not yet applied
+- V2 removal: not yet complete
+- Production migration: not started
 
-- Current production state: Memory V3 drop-in is active; V1 remains integrated.
-- Target: Memory V3-only runtime.
-- Migration path: direct V1 → validation/quarantine → V3.
-- Memory V2: cancelled; no new runtime or public support work.
-- Production migration: not started.
-- Permanent V1/V2 deletion: not authorized.
+## Required next work
 
-## Required migration gates
-
-1. Fresh verified backup and isolated restore — Phase 0 passed.
-2. V3-only runtime design and tests.
-3. Direct V1 → V3 dry-run.
-4. Source/target maps and provenance.
-5. Ambiguous-record quarantine.
-6. Row counts and integrity verification.
-7. Interruption/resume tests.
-8. Scoped rollback tests.
-9. Synthetic multi-group isolation tests.
-10. Explicit production migration approval.
-
-No production schema or memory data has been changed by the transformation
-branch so far.
+1. classify V1-dependent behavior by legitimate contract versus obsolete implementation
+2. preserve legitimate behavior in Memory V3
+3. add direct V1→V3 dry-run/apply/verify/rollback tooling
+4. add quarantine and interruption-resume state
+5. disable V1 normal reads/writes only after regression coverage is green
+6. remove V2 from active/public surfaces while retaining historical artifacts safely

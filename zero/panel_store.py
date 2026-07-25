@@ -164,7 +164,7 @@ class PanelStore:
         with self._connect() as db:
             row = db.execute("SELECT data_json FROM panel_setup WHERE id=1").fetchone()
             current = json.loads(row["data_json"])
-            current[step] = data
+            current[step] = _strip_secrets(data)
             index = SETUP_STEPS.index(step)
             next_step = SETUP_STEPS[min(index + 1, len(SETUP_STEPS) - 1)]
             db.execute("UPDATE panel_setup SET current_step=?,data_json=?,completed=?,updated_at=? WHERE id=1", (next_step, json.dumps(current), int(step == "start"), int(time.time())))

@@ -3,68 +3,43 @@
     "phase": 0,
     "status": "PASS",
     "commit": "f9588ec6588299a04d29561c9b4c8415c54e9507",
-    "changes": [],
-    "schema_changes": [],
-    "tests": [
-      "encrypted allowlist archive created",
-      "5 restored SQLite databases passed PRAGMA integrity_check",
-      "290 restored source archive members",
-      "production service state unchanged",
-      "no Telegram/provider calls"
-    ],
-    "rollback_point": "/root/zero-recovery/phase0-20260725T072202Z"
+    "tests": ["encrypted archive", "isolated restore", "5 SQLite integrity checks", "production unchanged"]
   },
   {
     "phase": 1,
     "status": "PASS",
     "commit": "23f1a08",
-    "changes": [
-      "public/private boundary policy",
-      "public release artifact policy",
-      "fail-closed release scanner",
-      "transformation/release/migration/security tracking files",
-      "release-related .gitignore hardening"
-    ],
-    "schema_changes": [],
-    "tests": [
-      "clean artifact fixture: 0 findings",
-      "unsafe artifact fixture: fail-closed with 2 findings",
-      "full suite: 568 passed, 1 skipped"
-    ],
-    "rollback_point": "f9588ec6588299a04d29561c9b4c8415c54e9507",
-    "known_issues": [
-      "current repository tree is intentionally not a release candidate"
-    ]
+    "tests": ["clean scanner fixture: 0 findings", "unsafe scanner fixture: 2 findings"]
   },
   {
     "phase": 2,
     "status": "PASS",
     "commit": "f81bc8f",
-    "changes": [
-      "zero/core/context.py",
-      "zero/core/__init__.py",
-      "zero/models.py",
-      "scripts/run_listener.py",
-      "tests/test_request_context.py"
-    ],
-    "schema_changes": [],
-    "tests": [
-      "RequestContext targeted: 4 passed",
-      "compileall: passed",
-      "full suite: 572 passed, 1 skipped"
-    ],
-    "rollback_point": "23f1a08",
-    "known_issues": [
-      "context propagation beyond the listener/IncomingMessage boundary remains to be completed"
-    ]
+    "tests": ["RequestContext targeted: 4 passed", "full suite at checkpoint: 572 passed, 1 skipped"]
   },
   {
     "phase": 3,
-    "status": "IN_PROGRESS",
-    "commit": null,
-    "changes": [],
-    "schema_changes": [],
-    "tests": [],
-    "rollback_point": "f81bc8f"
+    "status": "PARTIAL",
+    "commit": "b9e75c8",
+    "changes": ["strict typed configuration models", "atomic ConfigStore", "symbolic secret refs", "SetupService validation"]
+  },
+  {
+    "milestone": "memory-boundary",
+    "status": "PARTIAL",
+    "commit": "110311d",
+    "changes": ["MemoryService boundary backed by Memory V3"],
+    "known_issue": "legacy V1/V3 runtime composition remains until migration and compatibility behavior are completed"
+  },
+  {
+    "milestone": "cli",
+    "status": "PARTIAL",
+    "commit": "455ddbc",
+    "changes": ["zero version", "zero status", "zero config show"]
+  },
+  {
+    "checkpoint": "455ddbc",
+    "tests": ["full suite: 579 passed, 1 skipped"],
+    "production_changed": false,
+    "main_changed": false
   }
 ]
