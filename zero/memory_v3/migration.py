@@ -117,6 +117,29 @@ def _item(table: str, row: sqlite3.Row) -> MemoryV3Item:
             legacy_id=f"medium_term_memory:{row['event_id']}", created_at=float(row["occurred_at"]),
             expires_at=row["expires_at"], metadata={"source_table": "medium_term_memory", "migration": "v1_to_v3", "participants": participants},
         )
+    if table == "semantic_user_memory":
+        category = str(row["category"] or "").strip()
+        key = str(row["key"] or "").strip()
+        if not category or not key or row["chat_id"] is None or row["sender_id"] is None:
+            raise ValueError("ambiguous_identity_or_content")
+        try:
+            value = json.loads(row["value_json"])
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid_value_json") from exc
+        evidence = _ids(row["evidence_message_ids_json"])
+        if row["evidence_message_ids_json"] not in (None, "", "[]") and not evidence:
+            raise ValueError("invalid_evidence_message_ids")
+        try:
+            confidence = float(row["confidence"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_quality_score") from exc
+        return MemoryV3Item.personal(
+            chat_id=int(row["chat_id"]), user_id=int(row["sender_id"]),
+            content=f"{category}.{key}={value}", kind="v1:semantic",
+            importance=.8, confidence=confidence, source_message_ids=evidence,
+            legacy_id=f"semantic_user_memory:{row['id']}", created_at=float(row["first_seen_at"]),
+            expires_at=row["expires_at"], metadata={"source_table": "semantic_user_memory", "migration": "v1_to_v3", "category": category, "key": key},
+        )
     raise ValueError(f"unsupported source table: {table}")
 
 
@@ -147,6 +170,7 @@ def apply_v1_to_v3(
     table_specs = {
         "long_term_memory": {"id": "memory_id", "required": {"memory_id", "chat_id", "subject_user_id", "category", "content", "confidence", "source_message_ids_json", "created_at", "expires_at", "status"}},
         "medium_term_memory": {"id": "event_id", "required": {"event_id", "chat_id", "participants_json", "topic", "summary", "source_message_ids_json", "importance", "confidence", "occurred_at", "expires_at", "status"}},
+        "semantic_user_memory": {"id": "id", "required": {"id", "chat_id", "sender_id", "category", "key", "value_json", "confidence", "evidence_message_ids_json", "first_seen_at", "expires_at", "status"}},
     }
     rows_by_table = {table: _source_rows(source, table, spec["required"]) for table, spec in table_specs.items()}
     scanned = sum(len(rows) for rows in rows_by_table.values())

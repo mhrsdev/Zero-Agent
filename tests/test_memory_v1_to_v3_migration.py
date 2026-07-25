@@ -65,6 +65,50 @@ def medium_source_db(path):
         )
 
 
+def semantic_source_db(path):
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE semantic_user_memory(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL, category TEXT NOT NULL, key TEXT NOT NULL,
+                value_json TEXT NOT NULL, confidence REAL NOT NULL,
+                evidence_message_ids_json TEXT NOT NULL DEFAULT '[]', source_text_hash TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+                last_verified_at INTEGER, expires_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'active', version INTEGER NOT NULL DEFAULT 1,
+                created_by_backend TEXT NOT NULL DEFAULT 'semantic_memory'
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO semantic_user_memory(chat_id,sender_id,category,key,value_json,confidence,evidence_message_ids_json,source_text_hash,first_seen_at,last_seen_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (-300, 7, "preference", "drink", '"tea"', .9, "[31]", "hash-1", 2, 3, "active"),
+        )
+        db.execute(
+            "INSERT INTO semantic_user_memory(chat_id,sender_id,category,key,value_json,confidence,evidence_message_ids_json,source_text_hash,first_seen_at,last_seen_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (-300, 7, "preference", "broken", "not-json", .9, "[]", "hash-2", 2, 3, "active"),
+        )
+
+
+def test_direct_semantic_user_memory_mapping_quarantine_and_rollback(tmp_path):
+    source = tmp_path / "v1-semantic.db"
+    target = tmp_path / "v3-semantic.db"
+    backup = tmp_path / "v1-semantic.backup.db"
+    semantic_source_db(source)
+    service = MemoryV3Service(str(target))
+    service._put_sync(MemoryV3Item.group(chat_id=-300, content="pre-existing", kind="fact"))
+
+    dry = apply_v1_to_v3(source, target, run_id="semantic-r1", dry_run=True)
+    assert dry.scanned == 2 and dry.quarantined == 1
+    digest = backup_proof(source, backup)
+    result = apply_v1_to_v3(source, target, run_id="semantic-r1", dry_run=False, backup_path=backup, backup_sha256=digest)
+    assert result.imported == 1 and result.quarantined == 1
+    assert verify_v1_to_v3(target, "semantic-r1")["valid"] is True
+    rolled = rollback_v1_to_v3(target, "semantic-r1")
+    assert rolled["soft_deleted"] == 1
+
+
 def test_direct_v1_to_v3_dry_run_apply_verify_and_rollback(tmp_path):
     source = tmp_path / "v1.db"
     target = tmp_path / "v3.db"
