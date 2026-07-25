@@ -4,68 +4,79 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `2e76dde4aa71bc5248a837dde97c58f2dcd1c436`
-- Working tree: clean at checkpoint creation
-- Latest full test result: `587 passed, 1 skipped`
-- Production and `main`: untouched
+- HEAD: `a58c83b` (`feat: enforce memory v3-only normal runtime`)
+- Baseline/main: `f9588ec6588299a04d29561c9b4c8415c54e9507`; main was not changed
+- Working tree: clean at checkpoint creation after the tracking commit below
+- Full tests: `588 passed, 1 skipped`
+- Changed-module compile: passed
+- Production services/databases/sessions/credentials/systemd units: not modified or restarted
 
-## Completed; do not repeat
+## Verified reconstruction
 
-- Phase 0 encrypted backup and isolated restore rehearsal
-- Phase 1 public/private boundary and fail-closed artifact scanner
-- Phase 2 immutable RequestContext listener boundary
-- Phase 3 initial strict canonical configuration models and atomic store
-- Phase 3 MemoryService V3 boundary
-- Zero CLI entrypoint: version, status, config show
+- The reported `55839d6` existed, but the tree was not clean: it contained an unfinished Memory V3 prompt patch and an untracked regression.
+- The missing requested `RELEASE_CHECKLIST.md` was added.
+- Initial pre-repair suite was `586 passed, 2 failed, 1 skipped`; failures were obsolete V1/V2 shadow-prompt expectations.
+- Current suite is green at `588 passed, 1 skipped`.
+- Full matrix: `docs/FORENSIC_RECONSTRUCTION.md`.
 
-Commits relevant to this transformation:
+## Completed in this slice; do not repeat
 
-- `23f1a08` public release boundary
-- `f81bc8f` RequestContext boundary
-- `b9e75c8` strict canonical configuration store
-- `110311d` canonical MemoryService boundary
-- `455ddbc` Zero CLI entrypoint
+- Normal `ZeroBrain` prompt retrieval now goes through `MemoryService` backed by Memory V3.
+- Vision prompt retrieval now uses the same V3 boundary.
+- Normal V1 runtime retrieval/write flag is disabled; legacy V1 storage remains for archive/migration only.
+- V2 environment variables cannot select the V3 runtime and `brain.memory_v2` is absent.
+- Group monthly summaries write canonical V3 group items.
+- V3-only regressions cover prompt exclusion, V2-env isolation, and V1 runtime disablement.
+- Tracking and forensic reconstruction files refreshed.
 
-## First next action
+## Remaining incomplete work
 
-Begin the V3-only migration contract without broad cutover: inventory every
-active `compose_memory_context`, `retrieve_layered_memory`, semantic-memory
-and V2-planner call in `ZeroBrain`, classify each test dependency, and add a
-failing MemoryService regression proving normal prompt context comes only from
-Memory V3. Preserve legacy behavior behind migration-only adapters until the
-replacement behavior is green.
+1. Direct V1 → V3 migration with mandatory backup, dry-run, run ID/map, validation, quarantine, interruption resume, verification, idempotence and scoped rollback.
+2. Remove V2 from active/public runtime, setup, API, panel, TUI, config, tools and public docs while retaining safe historical artifacts.
+3. Finish canonical config conversion and prove every composition root.
+4. Implement true installation/group/membership/permission/tenant ownership and adversarial isolation.
+5. Normalize providers and implement only tested external API Web Search; remove public local/scraping coupling.
+6. Implement shared Bot/User Session/Hybrid adapters and duplicate-response prevention; keep Management Bot separate.
+7. Build secure canonical Admin API/authentication and the new English panel.
+8. Build the Zero-specific TUI using shared services.
+9. Isolate Office/Proactive, then Docker Compose, CI, license/NOTICE, dependency report, SBOM, docs, artifact tree and Community E2E.
 
-## Current unfinished work
+## First next atomic action
 
-1. Canonical configuration integration and shared setup
-2. V3-only runtime cutover without dual prompt injection
-3. Direct V1→V3 migration with quarantine/resume/verification/rollback
-4. Active/public Memory V2 removal
-5. Multi-Group isolation
-6. Provider abstraction
-7. External API-only Web Search
-8. Bot/User Session/Hybrid Telegram adapters
-9. Admin API/authentication
-10. English web panel
-11. Zero TUI
-12. Docker/CI/SBOM/license gates
-13. Documentation and clean public artifact
-14. Isolated Community E2E
-15. Production migration/publication packages, prepared but unapplied
+Inventory the existing V1 tables and schemas from `zero/storage.py` and the
+legacy migration helpers, then write a failing isolated test for a **direct**
+V1→V3 dry-run/apply contract. The test must include one valid scoped record,
+one ambiguous record that is quarantined rather than guessed, one pre-existing
+V3 row that survives, and a stable run ID/map. Do not use V2 as an intermediate
+target. Do not touch production databases.
 
-## Known regression history
+Relevant files:
 
-A direct attempt to force `v1_memory_runtime_enabled=False` broke existing V1 migration-shadow and profile-refresh behavior. It was reverted. Do not repeat that broad switch. Classify each failing behavior and migrate it behind `MemoryService`/V3 with regression tests before disabling V1.
+- `zero/memory_v3/service.py`
+- `zero/core/memory_service.py`
+- `zero/brain.py`
+- `zero/storage.py`
+- `scripts/migrate_memory_v1_to_v2.py` (historical shape; do not extend as the public path)
+- `scripts/migrate_memory_v3.py` (current legacy importer to audit)
+- `tests/test_memory_v3_only_prompt.py`
+- `tests/memory_v2/integration/test_shadow_prompt_e2e.py` (now V3-only behavior despite historical path)
+- `MIGRATION_STATUS.md`
+- `docs/FORENSIC_RECONSTRUCTION.md`
 
 ## Safety boundaries
 
-- Work only on `open-source/v0.1-transformation`.
-- Do not touch `main`, production databases, sessions, credentials, queues, systemd units, active panel or services.
-- No live Telegram/provider calls; use mocks or isolated synthetic environments.
-- Do not delete legacy V1/V2 artifacts during safe development.
-- Do not publish, rewrite Git history, rotate credentials, migrate production or make the repository public.
+- Work only on `open-source/v0.1-transformation` or an isolated worktree.
+- Never modify `main`, active production source/config/services, production DBs,
+  sessions, credentials, queues, panel or group data.
+- Never restart production or make live Telegram/provider calls.
+- Development migrations must use copied synthetic databases and restricted
+  backups with integrity/hash verification.
+- Do not publish, push forcefully, rewrite history, rotate credentials, revoke
+  sessions, permanently delete V1/V2 artifacts, or change repository visibility.
 - Keep secrets redacted and symbolic references only.
 
-## Required continuation discipline
+## Required checkpoint discipline
 
-After each atomic milestone: targeted tests, full suite if feasible, `git diff --check`, focused commit, and updates to `TRANSFORMATION_STATUS.md`, `TRANSFORMATION_JOURNAL.json`, `RELEASE_BLOCKERS.md`, `MIGRATION_STATUS.md`, `TEST_STATUS.md`, and this file. Keep the tree clean before stopping.
+For the next atomic migration slice: RED test first, implement minimally, run
+targeted tests, run the full suite, run `git diff --check`, update all tracking
+files and this prompt with the exact commit, commit, then verify a clean tree.

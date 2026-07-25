@@ -1,10 +1,10 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD before this slice: `55839d6a8859c35de33df9cf333c10ca6ccd4523`
+- Current HEAD: `a58c83b` (`feat: enforce memory v3-only normal runtime`)
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
 - Current milestone: Memory V3-only migration contract
-- Latest full suite: `587 passed, 1 skipped`
+- Latest full suite: `588 passed, 1 skipped`
 - Initial reconstruction found an unfinished dirty Memory V3 slice; it is now ready for commit.
 - Production migration: not started
 - Public publication: not authorized
