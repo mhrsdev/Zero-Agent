@@ -37,9 +37,9 @@
     "changes": ["zero version", "zero status", "zero config show"]
   },
   {
-    "checkpoint": "9ff6a56",
-    "tests": ["composition-root targeted: 13 passed", "compileall: passed", "full suite: 585 passed, 1 skipped"],
-    "changes": ["runtime_config compatibility loader", "shared ZERO_CONFIG_PATH policy", "canonical validation before listener/panel/worker/db startup"],
+    "checkpoint": "0856cc2",
+    "tests": ["panel/setup targeted: 8 passed", "full suite: 587 passed, 1 skipped"],
+    "changes": ["PanelStore accepts shared SetupService", "Telegram setup writes canonical symbolic refs", "invalid setup cannot advance", "resource-sensitive knowledge test made deterministic"],
     "production_changed": false,
     "main_changed": false
   }

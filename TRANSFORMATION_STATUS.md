@@ -1,10 +1,10 @@
 # Zero Transformation Status
 
 - Current branch: `open-source/v0.1-transformation`
-- Current HEAD at latest recorded checkpoint: `9ff6a56816d31c80c1f1dfcf354e9ddd223aa429`
+- Current HEAD at latest recorded checkpoint: `0856cc20a1da04459d822ac23d211c380fbd9628`
 - Baseline commit: `f9588ec6588299a04d29561c9b4c8415c54e9507`
-- Current milestone: shared setup integration
-- Latest full suite: `585 passed, 1 skipped`
+- Current milestone: Memory V3-only migration contract
+- Latest full suite: `587 passed, 1 skipped`
 - Working tree was clean before continuation artifacts were recorded.
 - Production migration: not started
 - Public publication: not authorized

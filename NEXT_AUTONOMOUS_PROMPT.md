@@ -4,9 +4,9 @@
 
 - Repository: `/root/zero`
 - Branch: `open-source/v0.1-transformation`
-- HEAD: `9ff6a56816d31c80c1f1dfcf354e9ddd223aa429`
+- HEAD: `0856cc20a1da04459d822ac23d211c380fbd9628`
 - Working tree: clean at checkpoint creation
-- Latest full test result: `585 passed, 1 skipped`
+- Latest full test result: `587 passed, 1 skipped`
 - Production and `main`: untouched
 
 ## Completed; do not repeat
@@ -28,10 +28,12 @@ Commits relevant to this transformation:
 
 ## First next action
 
-Complete the shared setup integration boundary: pass `ConfigStore`/`SetupService`
-into `PanelStore`/`PanelAPI`, make Telegram setup write only symbolic refs to
-canonical config, and add tests proving panel setup reloads the same config used
-by runtime roots. Then begin the V3-only migration contract.
+Begin the V3-only migration contract without broad cutover: inventory every
+active `compose_memory_context`, `retrieve_layered_memory`, semantic-memory
+and V2-planner call in `ZeroBrain`, classify each test dependency, and add a
+failing MemoryService regression proving normal prompt context comes only from
+Memory V3. Preserve legacy behavior behind migration-only adapters until the
+replacement behavior is green.
 
 ## Current unfinished work
 

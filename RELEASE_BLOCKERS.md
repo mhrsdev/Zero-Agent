@@ -2,8 +2,8 @@
 
 ## Open
 
-- Canonical configuration composition-root integration (runtime validation boundary completed; shared setup write-through remains open)
-- Shared SetupService replacing panel setup credential persistence
+- Canonical configuration composition-root integration (runtime validation and panel SetupService wiring completed; legacy field conversion remains open)
+- Shared SetupService replacing all remaining legacy setup paths
 - Memory V3-only runtime cutover
 - Direct V1→V3 migration with quarantine, resume, verification and rollback
 - Memory V2 active/public surface removal
