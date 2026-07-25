@@ -399,7 +399,6 @@ class StickerObserver:
             return False
 
         # Check chance
-        import random
         if random.random() > self.config.stickers.send_chance:
             return False
 
@@ -438,18 +437,9 @@ class StickerObserver:
         )
 
         # Pick from top 3 with some randomness
-        import random
         chosen = random.choice(candidates[:3])
         return StickerCandidate(sticker=chosen, score=chosen.quality_score, match_reason=f"mood:{mood}")
 
 
-import os
-import time
-import random
-from typing import Optional
-from telethon import functions
 from telethon.tl import types as t
-from zero.stickers.models import Sticker, StickerSet, StickerCandidate, StickerStats
-from zero.storage import ZeroStore
-from zero.vision import VisionProcessor
-from zero.config import ZeroConfig
+from zero.stickers.models import StickerStats

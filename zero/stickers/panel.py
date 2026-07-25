@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from telethon.tl import types
 from telethon import functions
 
 from zero.config import ZeroConfig
 from zero.storage import ZeroStore
-from zero.stickers.models import Sticker, StickerStats
+from zero.stickers.models import Sticker, StickerCandidate, StickerStats
 from zero.stickers.sender import StickerSender
 
 logger = logging.getLogger('zero.stickers.panel')

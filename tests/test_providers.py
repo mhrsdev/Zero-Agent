@@ -52,7 +52,7 @@ def openai_profile(**kwargs):
 def test_profile_rejects_a_credential_in_place_of_a_reference():
     """Groups select profiles; a profile must never carry the secret itself."""
     with pytest.raises(ValueError):
-        openai_profile(secret_ref="sk-live-0123456789abcdef0123456789")
+        openai_profile(secret_ref="sk-EXAMPLE-0123456789abcdef01234")
 
 
 def test_profile_rejects_invalid_names_and_limits():
@@ -83,17 +83,17 @@ def test_redacted_profile_never_exposes_a_secret():
 
 def test_openai_compatible_sends_chat_completions_with_bearer_auth():
     post = RecordingPost()
-    provider = OpenAICompatibleProvider(openai_profile(), post, api_key="test-key")
+    provider = OpenAICompatibleProvider(openai_profile(), post, api_key="example-key")
     result = asyncio.run(provider.complete(CompletionRequest(prompt="hi", system="be brief")))
 
     call = post.calls[0]
     assert call["url"] == "https://openrouter.ai/api/v1/chat/completions"
-    assert call["headers"]["Authorization"] == "Bearer test-key"
+    assert call["headers"]["Authorization"] == "Bearer example-key"
     assert [m["role"] for m in call["payload"]["messages"]] == ["system", "user"]
     assert result.text == "hello"
     assert result.input_tokens == 3 and result.output_tokens == 5
     # The key authenticates via header only and must not reach the URL.
-    assert "test-key" not in call["url"]
+    assert "example-key" not in call["url"]
 
 
 def test_openai_compatible_omits_authorization_when_no_key_is_configured():
@@ -109,11 +109,11 @@ def test_openai_compatible_omits_authorization_when_no_key_is_configured():
 
 def test_openai_compatible_retries_then_surfaces_a_redacted_failure():
     post = RecordingPost(fail_times=5)
-    provider = OpenAICompatibleProvider(openai_profile(max_retries=2), post, api_key="secret-key")
+    provider = OpenAICompatibleProvider(openai_profile(max_retries=2), post, api_key="example-secret")
     with pytest.raises(ProviderError) as error:
         asyncio.run(provider.complete(CompletionRequest(prompt="hi")))
     assert len(post.calls) == 3  # one attempt plus two retries
-    assert "secret-key" not in str(error.value)
+    assert "example-secret" not in str(error.value)
 
 
 def test_openai_compatible_rejects_an_empty_choice_list():
@@ -143,12 +143,12 @@ def gemini_response():
 def test_gemini_sends_the_key_as_a_header_never_in_the_url():
     post = RecordingPost(response=gemini_response())
     profile = ProviderProfile(name="quality", kind=ProviderKind.GEMINI, model="gemini-test", secret_ref="provider.gemini")
-    provider = GeminiProvider(profile, post, api_key="gemini-secret")
+    provider = GeminiProvider(profile, post, api_key="example-gemini-key")
     result = asyncio.run(provider.complete(CompletionRequest(prompt="hi")))
 
     call = post.calls[0]
-    assert call["headers"]["x-goog-api-key"] == "gemini-secret"
-    assert "gemini-secret" not in call["url"]
+    assert call["headers"]["x-goog-api-key"] == "example-gemini-key"
+    assert "example-gemini-key" not in call["url"]
     assert call["url"].endswith("/models/gemini-test:generateContent")
     assert result.text == "grounded" and result.output_tokens == 6
 
@@ -192,9 +192,9 @@ def test_registry_rejects_duplicate_profile_names():
 
 
 def test_registry_describe_is_safe_to_return_from_an_api():
-    registry = registry_with(openai_profile(), secrets={"provider.openrouter": "super-secret"})
+    registry = registry_with(openai_profile(), secrets={"provider.openrouter": "example-resolved-value"})
     payload = json.dumps(registry.describe())
-    assert "super-secret" not in payload
+    assert "example-resolved-value" not in payload
     assert "provider.openrouter" in payload
 
 

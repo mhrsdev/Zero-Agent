@@ -31,12 +31,7 @@ class StickerClassifier:
         '😡': 'angry', '🤬': 'angry', '😱': 'shock', '😲': 'surprise',
         '🤔': 'thinking', '💀': 'dead', '👍': 'approve', '👎': 'disapprove',
         '🙏': 'pray', '🎉': 'celebrate', '🔥': 'fire', '💯': 'perfect',
-        '✨': 'sparkle', '💩': 'funny', '😂': 'funny', '🤣': 'funny',
-        '😭': 'sad', '😢': 'sad', '😍': 'love', '❤️': 'love',
-        '😎': 'cool', '😏': 'smirk', '😡': 'angry', '🤬': 'angry',
-        '😱': 'shock', '😲': 'surprise', '🤔': 'thinking', '💀': 'dead',
-        '👍': 'approve', '👎': 'disapprove', '🙏': 'pray', '🎉': 'celebrate',
-        '🔥': 'fire', '💯': 'perfect', '✨': 'sparkle', '💩': 'funny',
+        '✨': 'sparkle', '💩': 'funny',
     }
 
     # Vision-based tag keywords

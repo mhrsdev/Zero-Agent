@@ -2,3 +2,25 @@
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 200
+extend-exclude = ["panel"]
+
+[tool.ruff.lint]
+# Scoped to defects rather than style. Much of the runtime predates this
+# transformation and is written in a dense single-line idiom; reformatting it
+# wholesale would produce a large untestable diff and bury real regressions.
+# These rules catch things that are wrong, not things that are unfamiliar:
+#   E9  syntax and IO errors
+#   F   pyflakes - undefined names, unused imports, duplicate keys, dead locals
+#   B   bugbear - mutable defaults, unused loop vars, except-clause mistakes
+#   S   bandit subset - insecure calls
+# The style-only families (E1/E2/E3/E5, W, I, N, UP) stay off until the legacy
+# modules are reformatted deliberately in their own change.
+select = ["E9", "F821", "F811", "F601", "F602", "B002", "B006", "B018", "S102", "S307", "S602"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately construct malformed input and rebind fixtures.
+"tests/*" = ["S102", "B018"]

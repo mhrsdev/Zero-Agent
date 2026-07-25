@@ -25,38 +25,6 @@ class StickerAccountSaver:
         self.store = store
         self.client = client
 
-    async def save_to_favorites(self, sticker) -> bool:
-        """
-        Add sticker to Favorites/Saved Stickers using FaveStickerRequest.
-        
-        This adds the sticker to the user's Saved Stickers panel in Telegram.
-        """
-        if not self.config.stickers.auto_save_enabled:
-            return False
-
-        try:
-            input_doc = types.InputDocument(
-                id=sticker.doc_id,
-                access_hash=sticker.access_hash,
-                file_reference=sticker.file_reference,
-            )
-
-            await self.client(functions.messages.FaveStickerRequest(
-                id=types.InputDocument(
-                    id=sticker.doc_id,
-                    access_hash=sticker.access_hash,
-                    file_reference=sticker.file_reference,
-                ),
-                unfave=False
-            ))
-
-            logger.info(f"Sticker {sticker.doc_id} added to favorites")
-            return True
-
-        except Exception as e:
-            logger.warning(f"Failed to save sticker {sticker.doc_id} to favorites: {e}")
-            return False
-
     async def remove_from_favorites(self, sticker) -> bool:
         """Remove sticker from favorites."""
         try:

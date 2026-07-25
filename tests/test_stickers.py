@@ -167,3 +167,74 @@ class TestStickerCandidate:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+def test_sticker_panel_module_resolves_every_runtime_name():
+    """`/zero stickers send` constructed StickerCandidate without importing it.
+
+    `from __future__ import annotations` hides missing names used in
+    annotations, but this one is constructed in a function body, so the command
+    raised NameError every time an operator ran it. Resolving every name the
+    module calls catches the class of defect rather than the single instance.
+    """
+    import ast
+    import builtins
+
+    from zero.paths import repo_path
+
+    source = repo_path("zero", "stickers", "panel.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    bound = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+            arguments = node.args
+            for group in (arguments.posonlyargs, arguments.args, arguments.kwonlyargs):
+                bound |= {argument.arg for argument in group}
+            for optional in (arguments.vararg, arguments.kwarg):
+                if optional is not None:
+                    bound.add(optional.arg)
+        elif isinstance(node, ast.ClassDef):
+            bound.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+
+    missing = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id not in bound
+    }
+    assert not missing, f"names constructed at runtime but never imported: {sorted(missing)}"
+
+
+def test_no_class_defines_the_same_method_twice():
+    """A duplicated method silently shadows the earlier implementation.
+
+    StickerAccountSaver defined save_to_favorites twice; the first version
+    called Telegram but never updated the database, and was unreachable because
+    the second definition replaced it. Whichever is intended, having both is a
+    defect.
+    """
+    import ast
+
+    from zero.paths import repo_path
+
+    offenders: list[str] = []
+    root = repo_path("zero")
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            seen: dict[str, int] = {}
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name in seen:
+                        offenders.append(
+                            f"{path.relative_to(root)}:{item.lineno} {node.name}.{item.name}"
+                            f" (first at line {seen[item.name]})"
+                        )
+                    seen[item.name] = item.lineno
+    assert offenders == [], f"duplicate method definitions: {offenders}"

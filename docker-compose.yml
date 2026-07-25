@@ -1,0 +1,78 @@
+# Zero - official self-hosted installation.
+#
+# The panel binds to loopback only. Publishing it beyond localhost is an
+# explicit operator decision that belongs behind an authenticating reverse
+# proxy; see docs/security.md.
+
+services:
+  zero-panel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zero:0.1.0-alpha
+    command: ["panel"]
+    restart: unless-stopped
+    # Loopback only. Change to 0.0.0.0 only behind a reverse proxy you control.
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      ZERO_HOME: /data
+      ZERO_CANONICAL_CONFIG: /data/config/zero.json
+      ZERO_PANEL_HOST: 0.0.0.0
+      ZERO_PANEL_PORT: "8787"
+      # Resolved from the mounted secret file; never baked into the image.
+      ZERO_SECRET_FILE: /run/secrets/zero_secrets
+    volumes:
+      - zero-data:/data
+    secrets:
+      - zero_secrets
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+
+  zero-listener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zero:0.1.0-alpha
+    command: ["listener"]
+    restart: unless-stopped
+    depends_on:
+      zero-panel:
+        condition: service_healthy
+    environment:
+      ZERO_HOME: /data
+      ZERO_CANONICAL_CONFIG: /data/config/zero.json
+      ZERO_SECRET_FILE: /run/secrets/zero_secrets
+    volumes:
+      - zero-data:/data
+    secrets:
+      - zero_secrets
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+
+volumes:
+  zero-data:
+    driver: local
+
+secrets:
+  zero_secrets:
+    # Create this file before the first start; keep it out of version control.
+    file: ./runtime/secrets/zero.secrets.yaml
