@@ -43,6 +43,7 @@ from zero.office.planner import OfficePlanner
 from zero.office.worker import PlanningCoordinator, RepairCoordinator
 from zero.office.delivery import DeliveryCoordinator, VisualReviewCoordinator
 from zero.office.telegram import TelegramOfficeBridge
+from zero.tenancy import GroupState, Role, Scope, TenancyRegistry
 
 CONFIG_PATH = Path(runtime_config_path())
 
@@ -79,6 +80,8 @@ async def main() -> None:
                 module_logger.addHandler(h)
         module_logger.propagate = False
     store = ZeroStore(config.memory.db_path, recent_messages_limit=config.memory.recent_messages_limit, long_term_limit=config.memory.long_term_limit)
+    tenancy = TenancyRegistry(Path(config.memory.db_path).with_name('tenancy.db'))
+    installation_id = os.environ.get('ZERO_INSTALLATION_ID', 'local')
     stale_claims = await store.expire_stale_incoming_messages()
     if stale_claims:
         logging.getLogger('zero.listener').warning('INCOMING_STALE_CLAIMS_EXPIRED count=%s', stale_claims)
@@ -142,6 +145,13 @@ async def main() -> None:
             logger.info('MEMORY_SHORT_REBUILT trace_id=startup chat_id=%s active_topic=%s', rebuild_chat_id, rebuilt.get('active_topic', ''))
         except Exception as exc:
             logger.warning('MEMORY_SHORT_SKIPPED trace_id=startup chat_id=%s reason=%s exception_type=%s', rebuild_chat_id, type(exc).__name__, type(exc).__name__)
+    for tenancy_chat_id in sorted(rebuild_chat_ids):
+        group_id = f"telegram:{tenancy_chat_id}"
+        discovered = tenancy.discover_group(installation_id, group_id, platform_chat_id=tenancy_chat_id)
+        owner_scope = Scope(installation_id, group_id, int(me.id))
+        tenancy.add_member(owner_scope, int(me.id), Role.OWNER)
+        if discovered.state is GroupState.PENDING:
+            tenancy.set_group_state(owner_scope, GroupState.ACTIVE)
     reactions = ReactionService(config, store, client, int(me.id), social_awareness=awareness)
 
     request_logger = setup_logger('zero.requests', '/root/zero/runtime/logs/requests.log')
@@ -169,6 +179,17 @@ async def main() -> None:
         if not _allowed_chat(event, config):
             request_logger.info('TRACE=%s SKIP reason=not_allowed', trace_id)
             return
+
+        try:
+            scope = tenancy.resolve_scope(
+                installation_id, platform_chat_id=int(event.chat_id or 0),
+                user_id=int(event.sender_id or 0), request_id=trace_id, trace_id=trace_id,
+            )
+            tenancy.require_serving(scope)
+        except Exception as exc:
+            request_logger.warning('TRACE=%s SKIP reason=scope_resolution_failed exception_type=%s', trace_id, type(exc).__name__)
+            return
+        brain.memory = brain.memory.bind(scope, tenancy)
 
         message_id = int(getattr(event, 'id', 0) or 0)
         if message_id:
@@ -440,7 +461,7 @@ async def main() -> None:
             logger.info('REPLIED reason=%s sender=%s trace_id=%s', decision.reason, incoming.sender_id, trace_id)
 
         if decision.interject:
-            await store.set_setting('last_interject_at', str(time.time()))
+            await store.set_setting(f'last_interject_at:{int(incoming.chat_id)}', str(time.time()))
 
     @client.on(events.NewMessage)
     async def on_message(event):
@@ -554,16 +575,18 @@ async def main() -> None:
                     continue
                 if random.random() > config.persona.idle_starter_probability:
                     continue
-                last = float(await store.get_setting('last_starter_at', '0') or 0)
-                if time.time() - last < config.persona.min_starter_gap_seconds:
-                    continue
-                if not await awareness.allow_action(groups[0], 'starter'):
-                    continue
-                text = await brain.maybe_starter(groups[0])
-                if text and text != '__NO_REPLY__':
-                    await client.send_message(groups[0], text[: config.policy.max_reply_chars])
-                    await store.set_setting('last_starter_at', str(time.time()))
-                    logger.info('STARTER_SENT')
+                for chat_id in groups:
+                    last_key = f'last_starter_at:{int(chat_id)}'
+                    last = float(await store.get_setting(last_key, '0') or 0)
+                    if time.time() - last < config.persona.min_starter_gap_seconds:
+                        continue
+                    if not await awareness.allow_action(chat_id, 'starter'):
+                        continue
+                    text = await brain.maybe_starter(chat_id)
+                    if text and text != '__NO_REPLY__':
+                        await client.send_message(chat_id, text[: config.policy.max_reply_chars])
+                        await store.set_setting(last_key, str(time.time()))
+                        logger.info('STARTER_SENT chat_id=%s', chat_id)
             except Exception as e:
                 logger.exception('STARTER_LOOP_FAILED %s', type(e).__name__)
 

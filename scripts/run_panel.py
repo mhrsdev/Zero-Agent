@@ -105,10 +105,10 @@ async def main() -> None:
                 return int(raw)
         except (TypeError, ValueError):
             pass
-        if config.listener.allowed_group_ids:
-            return int(config.listener.allowed_group_ids[0])
+        if len(config.listener.allowed_group_ids) == 1:
+            return int(next(iter(config.listener.allowed_group_ids)))
         active = await store.get_active_group_chat_ids()
-        return int(active[0]) if active else 0
+        return int(next(iter(active))) if len(active) == 1 else 0
 
     @dp.message(Command('start'))
     async def cmd_start(message: Message) -> None:

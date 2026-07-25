@@ -423,7 +423,7 @@ class ZeroBrain:
         direct_other = bool(re.search(r'(^|\s)@[A-Za-z0-9_]{3,}', message.text or '')) and not message.mention_zero
         if not self.config.persona.allow_random_interject or message.sender_is_bot or direct_other or (message.reply_text and not message.reply_to_zero):
             return False
-        last = float(await self.store.get_setting('last_interject_at', '0') or 0)
+        last = float(await self.store.get_setting(f'last_interject_at:{int(message.chat_id)}', '0') or 0)
         if time.time() - last < self.config.persona.min_interject_gap_seconds:
             return False
         return random.random() < self.config.persona.interject_probability
