@@ -23,6 +23,7 @@ from zero.experience_memory import ExperienceMemory
 from zero.procedural_memory import ProceduralMemory
 from zero.world_model import WorldModel
 from zero.config import ZeroConfig
+from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.logging_utils import setup_logger
 from zero.management import load_bot_token
 from zero.router import IndependentRouter
@@ -38,7 +39,7 @@ from zero.knowledge import KnowledgeWorker
 from zero.panel_api import PanelAPI
 from zero.panel_store import PanelStore
 
-CONFIG_PATH = Path(os.environ.get('ZERO_CONFIG_PATH', '/etc/zero/zero.yaml'))
+CONFIG_PATH = Path(runtime_config_path('/etc/zero/zero.yaml'))
 
 
 def owner_only(config: ZeroConfig, message: Message) -> bool:
@@ -55,7 +56,7 @@ async def debug_web_search_hits(web: HybridWeb, query: str):
 
 
 async def main() -> None:
-    config = ZeroConfig.load(CONFIG_PATH)
+    config = load_effective_config(CONFIG_PATH, ZeroConfig)
     logger = setup_logger('zero.panel', config.logs.panel_log)
     store = ZeroStore(config.memory.db_path, recent_messages_limit=config.memory.recent_messages_limit, long_term_limit=config.memory.long_term_limit)
     social = SocialService(store)

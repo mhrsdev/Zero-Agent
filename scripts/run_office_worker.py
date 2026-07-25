@@ -10,16 +10,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zero.config import ZeroConfig
+from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.office.db import OfficeRepository
 from zero.office.worker import OfficeWorker
 from zero.office.cleanup import cleanup_expired_workspaces
 
 
-CONFIG_PATH = Path("/root/zero/config/zero.yaml")
+CONFIG_PATH = Path(runtime_config_path())
 
 
 def main() -> int:
-    config = ZeroConfig.load(CONFIG_PATH)
+    config = load_effective_config(CONFIG_PATH, ZeroConfig)
     if not config.office.enabled:
         return 0
     repository = OfficeRepository(config.memory.db_path)

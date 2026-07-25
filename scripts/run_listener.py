@@ -23,6 +23,7 @@ from telethon.tl import types
 from zero.brain import ZeroBrain, reply_char_limit
 from zero.reactions import ReactionService
 from zero.config import ZeroConfig
+from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.logging_utils import setup_logger
 from zero.management import load_bot_token, send_bot_message
 from zero.models import IncomingMessage
@@ -43,7 +44,7 @@ from zero.office.worker import PlanningCoordinator, RepairCoordinator
 from zero.office.delivery import DeliveryCoordinator, VisualReviewCoordinator
 from zero.office.telegram import TelegramOfficeBridge
 
-CONFIG_PATH = Path('/root/zero/config/zero.yaml')
+CONFIG_PATH = Path(runtime_config_path())
 
 
 def _request_log_fields(text: str) -> tuple[int, str]:
@@ -65,7 +66,7 @@ def _allowed_chat(event, config: ZeroConfig) -> bool:
 
 
 async def main() -> None:
-    config = ZeroConfig.load(CONFIG_PATH)
+    config = load_effective_config(CONFIG_PATH, ZeroConfig)
     Path('/root/zero/runtime/logs').mkdir(parents=True, exist_ok=True)
     logger = setup_logger('zero.listener', config.logs.listener_log)
     # CRITICAL: route module loggers into listener.log (otherwise Search logs are lost).
