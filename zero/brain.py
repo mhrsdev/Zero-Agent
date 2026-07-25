@@ -17,6 +17,7 @@ from .group_context import GroupContext
 from .proactive_followups import ProactiveFollowups
 from .document_bundles import DocumentBundles
 from .memory_v3 import MemoryV3Service
+from .core.memory_service import MemoryService
 from .memory_v3.retrieval_planner import metadata as planner_metadata, parse as parse_retrieval_plan, prompt as planner_prompt, window as planner_window
 from .market_prices import BinancePriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError, TGJUWebPriceClient
 from .semantic_memory import SemanticUserMemory
@@ -261,6 +262,7 @@ class ZeroBrain:
         self.world_model = WorldModel(store.db_path)
         v3_path = os.getenv('ZERO_MEMORY_V3_DB') or os.path.join(os.path.dirname(str(store.db_path)), 'zero-memory-v3.db')
         self.memory_v3 = MemoryV3Service(v3_path)
+        self.memory = MemoryService(self.memory_v3)
         # Read-only compatibility alias for legacy test callers; production uses memory_v3.
         self.memory_v2 = self.memory_v3
         self.group_context = GroupContext(store, router)
