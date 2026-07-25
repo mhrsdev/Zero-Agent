@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .core.context import RequestContext
+
 
 MODES = {"normal", "funny", "sarcastic", "serious", "assistant", "teacher", "debate"}
 
@@ -31,6 +33,7 @@ class IncomingMessage:
     sender_display_name: str = ''
     platform: str = 'telegram'
     account_scope: str = ''
+    context: RequestContext | None = None
     is_forwarded: bool = False
     is_service_message: bool = False
     resolved_target_user_id: int | None = None

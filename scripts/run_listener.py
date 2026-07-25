@@ -26,6 +26,7 @@ from zero.config import ZeroConfig
 from zero.logging_utils import setup_logger
 from zero.management import load_bot_token, send_bot_message
 from zero.models import IncomingMessage
+from zero.core.context import RequestContext
 from zero.router import IndependentRouter
 from zero.storage import ZeroStore
 from zero.social import SocialService, is_social_optout_text
@@ -272,6 +273,21 @@ async def main() -> None:
             media_type = 'image'
 
         display_name = ' '.join(x for x in [getattr(sender, 'first_name', '') or '', getattr(sender, 'last_name', '') or ''] if x).strip()
+        thread_id = int(getattr(getattr(getattr(event, 'message', None), 'reply_to', None), 'reply_to_top_id', 0) or 0) or None
+        request_context = RequestContext(
+            installation_id=os.getenv('ZERO_INSTALLATION_ID', 'local'),
+            account_scope=account_scope,
+            platform='telegram',
+            telegram_chat_id=int(event.chat_id or 0),
+            internal_group_id=f'telegram:{int(event.chat_id or 0)}',
+            sender_id=int(event.sender_id or 0),
+            thread_id=thread_id,
+            message_id=int(getattr(event, 'id', 0) or 0),
+            reply_to_message_id=reply_to_message_id,
+            request_id=trace_id,
+            trace_id=trace_id,
+            transport_mode='user_session',
+        )
         incoming = IncomingMessage(
             chat_id=int(event.chat_id or 0),
             chat_title=getattr(event.chat, 'title', '') or '',
@@ -294,12 +310,13 @@ async def main() -> None:
             sender_display_name=display_name,
             platform='telegram',
             account_scope=account_scope,
+            context=request_context,
             is_forwarded=bool(getattr(getattr(event, 'message', None), 'fwd_from', None)),
             is_service_message=bool(getattr(getattr(event, 'message', None), 'action', None)),
             resolved_target_user_id=resolved_target_user_id,
             resolved_target_kind=resolved_target_kind,
             resolved_mention_user_ids=tuple(resolved_mention_user_ids),
-            thread_id=(int(getattr(getattr(getattr(event, 'message', None), 'reply_to', None), 'reply_to_top_id', 0) or 0) or None),
+            thread_id=thread_id,
         )
 
         request_logger.info(
