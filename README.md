@@ -1,385 +1,197 @@
-# Zero — Independent Telegram AI Companion
+# Zero
+
+Zero is a self-hosted Telegram AI companion in an alpha state. The `main` branch contains a Telegram user-session listener, an owner-only management bot, a local web administration panel, a terminal administration interface, SQLite-backed state, provider routing, controlled web search, memory services, and an optional OfficeCLI workflow.
+
+Repository: <https://github.com/mhrsdev/Zero-Agent.git>
+
+> **Alpha status:** This README describes the current `main`/`0.1.0-alpha` release line. It is not a production-readiness statement. `IMPLEMENTED` means source code exists; `VERIFIED LOCALLY` means the corresponding tests or local smoke command passed; `LIVE E2E VERIFIED` is reserved for a real external-account or provider run. This audit did not perform live Telegram or paid-provider E2E verification.
+
+## Features
+
+- Telegram user-session listener using Telethon, restricted by configured group allowlists.
+- Owner-only Telegram management bot using aiogram.
+- Local `aiohttp` administration panel with health, authentication, setup, and operational views.
+- Curses-style TUI with status, doctor, groups, backup, logs, and setup panels.
+- SQLite storage and the current Memory V3 service, with migration tooling from older V1 data.
+- Legacy runtime provider routing for Gemini and OpenRouter, including key pools, cooldowns, quotas, retries, and fallback.
+- A separate Provider Registry component with symbolic secret references, fallback chains, rate limiting, health, and usage accounting.
+- Google Grounding-backed live search through configured official external APIs.
+- Legacy/internal SearXNG code remains in the tree but is disabled and is not a public Zero feature.
+- Optional OfficeCLI document workflows for DOCX, XLSX, and PPTX, guarded by explicit commands, quotas, validation, isolated workspaces, rendering, and delivery state.
+
+Feature status is intentionally conservative. Presence of a module or test is not treated as proof of a live external integration.
+
+## Architecture
+
+```text
+Telegram user session ──▶ run_listener.py ──▶ ZeroBrain ──▶ SQLite / Memory V3
+                                      │          ├── IndependentRouter
+                                      │          ├── Google Grounding / web pipeline
+                                      │          └── optional OfficeCLI workers
+
+Telegram management bot ──▶ run_panel.py ──▶ PanelAPI ──▶ local aiohttp panel
+
+python -m zero tui ──▶ read-only operational panels
+```
+
+The default composition roots instantiate `IndependentRouter(config)` directly. The newer `zero.providers.ProviderRegistry` is optional in `IndependentRouter`; it is tested and usable, but it is not the registry-backed default composition for the listener and panel in this commit.
+
+## Telegram modes
+
+### User Session Mode — implemented in the listener
+
+`run_listener.py` creates a Telethon `TelegramClient` from the legacy runtime configuration. It requires a Telegram API ID, API hash, and authorized session file. Messages are processed only for configured allowed groups. A private message can be observed for permission and Office command handling, but the listener is not a general public bot account.
+
+**Status:** `IMPLEMENTED`; local contract tests pass; `LIVE E2E VERIFIED: no`.
+
+### Management Bot Mode — implemented as the management bot
+
+`run_panel.py` creates an aiogram `Bot` from a protected `BOT_TOKEN=...` file. Management commands are owner-only and private-chat restricted. The panel process also serves the local HTTP panel.
+
+**Status:** `IMPLEMENTED`; local panel and authentication tests pass; `LIVE E2E VERIFIED: no`.
+
+### Hybrid Mode — configuration contract, not a unified runtime switch
+
+The canonical setup schema accepts `disabled`, `bot`, `user_session`, and `hybrid` and validates the required symbolic secret references. Same-commit tests cover that contract and Office Telegram bridge behavior. The public listener and panel composition roots still run as two separate legacy processes; this commit does not provide a single canonical mode switch that replaces both processes.
+
+**Status:** `IMPLEMENTED` as configuration and adapter contracts; `VERIFIED LOCALLY` by tests; not a claim of unified live deployment.
+
+## Provider routing
+
+The default runtime path is `zero.router.IndependentRouter`:
+
+- Gemini is used for Google Grounding search calls.
+- Gemini and OpenRouter are configured in the legacy YAML runtime config.
+- Provider key pools expose redacted key IDs, quota state, cooldowns, retries, and fallback metadata.
+- Secrets are loaded from protected files and are not intended to be committed.
+
+`zero.providers.ProviderRegistry` is a separate, implemented component. It accepts `ProviderProfile` objects and symbolic `secret_ref` values, and its routing, fallback, redaction, health, cost, and rate-limit behavior is locally tested. The default `run_listener.py` and `run_panel.py` constructors do not pass a registry, so do not describe registry-backed routing as the default live runtime for this commit.
+
+## Web search
+
+Web search is disabled by default in `config/zero.example.yaml` (`web.enabled: false`). The public runtime documentation only describes configured official external APIs: Google Grounding through the Gemini route is the supported live-search path in this release line.
+
+SearXNG modules remain in the source tree as legacy/internal code. They are disabled by default, are not a hosted Zero service, and are not advertised as a public fallback or supported public feature.
+
+The repository also contains Telegram Search code, but the legacy configuration defaults it to disabled and archived, and the panel documentation excludes it from the public release/UI. It is not advertised here as a public feature.
+
+## Memory system
+
+The current runtime has a Memory V3 service and the normal prompt path is tested to use V3 data rather than legacy V1 markers. The repository still contains older V1/V2 storage and migration artifacts.
+
+The direct migration tool is:
+
+```bash
+python scripts/migrate_memory_v1_to_v3.py \
+  --source /path/to/v1.db \
+  --target /path/to/v3.db \
+  --run-id migration-001 \
+  --dry-run
+```
+
+Apply mode requires a backup path and matching SHA-256 proof; the tool also supports `--verify` and `--rollback`. Migration behavior is locally tested with real temporary SQLite databases. No live production migration is claimed.
+
+## Office rendering
+
+Office support is optional and disabled by default. The listener starts Office services only when `office.enabled` is true. Supported formats in the source are DOCX, XLSX, and PPTX. The workflow uses explicit `/docx`, `/xlsx`, or `/pptx` commands, OOXML preflight, quotas, a persistent queue, an isolated worker, output validation, preview rendering, optional visual review, bounded repair, and idempotent delivery.
+
+The external executable path configured by the example is `/usr/local/lib/zero-office/officecli`. Rendering also requires a supported Chrome/Chromium backend. The repository's real OfficeCLI integration tests passed in the audit environment, but no live Telegram delivery was performed.
+
+## Administration panel and TUI
+
+### Panel
+
+Run the panel with `python scripts/run_panel.py`. It serves `http://127.0.0.1:8787` by default, controlled by `ZERO_PANEL_HOST` and `ZERO_PANEL_PORT`. Keep it on loopback and put it behind an authenticated HTTPS reverse proxy if remote access is required. The management bot in the same process is owner-only.
+
+The panel is a real local adapter, not a promise that every maintenance action is available. The current documentation explicitly keeps Telegram mode connections, provider CRUD, group CRUD, backup actions, and maintenance actions behind backend contracts rather than faking them in the UI.
+
+### TUI
+
+```bash
+python -m zero tui
+python -m zero tui --print
+python -m zero tui --print --panel doctor
+```
+
+Available panels are `status`, `doctor`, `groups`, `backup`, `logs`, and `setup`.
+
+## Installation
+
+See [`INSTALLATION.md`](INSTALLATION.md) for system requirements, OS boundaries, credentials, Telegram modes, provider configuration, database/migration commands, Docker caveats, health checks, backups, rollback, troubleshooting, and removal.
+
+Quick manual entry point:
+
+```bash
+git clone https://github.com/mhrsdev/Zero-Agent.git
+cd Zero-Agent
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+## Docker status — not turnkey in this release line
+
+The repository contains a pinned two-stage Dockerfile, an unprivileged `zero` user, a read-only filesystem, a `/data` volume, a health check at `/api/health`, and Compose services `zero-panel` and `zero-listener`.
+
+**Important:** the current Compose setup requires both configuration layers: canonical JSON at `/data/config/zero.json` and legacy YAML selected through `ZERO_CONFIG_PATH`. The Compose file does not provision the legacy YAML path itself. Docker build/run was not locally verified in the audit environment, so Compose must not be treated as a turnkey installation until both layers are provisioned and the path boundary is resolved. See [`INSTALLATION.md`](INSTALLATION.md).
+## Health checks
+
+```bash
+python -m zero version
+python -m zero status
+python -m zero doctor
+curl -fsS http://127.0.0.1:8787/api/health
+```
+
+`zero doctor` performs local checks and does not contact Telegram or an AI provider. It reports Python, runtime-home, canonical-config, SQLite FTS5, and dependency observations. A clean-container Docker health check targets the panel endpoint.
+
+## Testing
+
+The repository configures pytest with `tests/` as its test path. The CI workflow runs compilation, pytest, migration and tenancy checks, CLI smoke checks, lint/security/artifact checks, and a Docker build smoke test. Use:
+
+```bash
+python -m pytest -q -p no:cacheprovider
+```
+
+Tests with names such as `live_e2e`, `real_integration`, or external-account behavior should not be read as proof that this checkout has successfully authenticated to Telegram, called a paid provider, or delivered a live message.
+
+## Security model
+
+- Keep bot tokens, Telegram API hashes, session files, provider keys, databases, logs, and runtime state outside version control.
+- The bot token file must be private and contain a `BOT_TOKEN=...` line; the loader rejects group/world-readable files.
+- Secret overlays are selected with `ZERO_SECRET_FILE` and are permission-checked.
+- Canonical config stores symbolic secret references, not credential values.
+- The listener uses configured group allowlists; the management bot requires the configured owner in a private chat.
+- Keep the panel on loopback and use an HTTPS reverse proxy for remote access.
+- Office workers are intended to run unprivileged and isolated; keep OfficeCLI and the browser backend patched.
+
+## Known limitations
+
+- This alpha has separate legacy YAML runtime and canonical JSON setup layers.
+- Provider Registry is optional and not the default listener/panel composition.
+- Bot, user-session, and hybrid mode contracts exist, but hybrid is not a single unified production switch.
+- SearXNG code is legacy/internal and disabled; it is not a public feature or supported public fallback.
+- Telegram Search remains archived/disabled in the public runtime path.
+- Docker build/run was not locally verified in this audit because no Docker-compatible engine was installed.
+- Office live rendering depends on an external pinned OfficeCLI binary and a compatible browser backend.
+- No live Telegram or paid-provider E2E verification is claimed.
+- The repository currently contains conflicting licensing files; see the License section below.
+
+## Roadmap
+
+The source and tests point to the following evidence-backed work, without implying completion:
+
+- make canonical setup and legacy runtime configuration one coherent path;
+- wire Provider Registry profiles into the default composition roots;
+- finish and document the supported Telegram transport lifecycle;
+- keep public search exposure explicit and separately gated;
+- complete operational migration/recovery verification with real deployment artifacts;
+- resolve the licensing decision and align `LICENSE`, `PROPRIETARY_LICENSE`, and `NOTICE`.
+
+## Contributing
+
+This repository does not currently contain `CONTRIBUTING.md`. Until contribution terms and licensing are resolved, do not infer that pull requests, forks, redistribution, or derivative works are authorized. For private owner-approved work, keep changes narrow, add focused tests, avoid secrets and runtime data, and run the relevant pytest and static checks before requesting review.
 
 ## License
 
-**English**
-
-Proprietary software. All rights reserved.
-
-Access to this repository does not grant permission to use, copy,
-modify, deploy, publish, or redistribute this project.
-
-Written permission from the copyright holder is required for any use.
-
-**فارسی**
-
-این نرم‌افزار اختصاصی است و کلیه‌ی حقوق آن محفوظ است.
-
-دسترسی به این repository هیچ اجازه‌ای برای استفاده، کپی، تغییر، استقرار،
-انتشار یا توزیع مجدد این پروژه ایجاد نمی‌کند.
-
-هرگونه استفاده نیازمند اجازه‌ی کتبی صاحب حق نشر است.
-
-<p align="center">
-  <b>یک همراه هوشمند، طبیعی و حافظه‌دار برای گروه‌های تلگرام</b><br>
-  <i>An independent, safety-first Telegram AI companion built for natural group interaction</i>
-</p>
-
----
-
-## 📌 درباره پروژه
-
-**Zero** یک ایجنت مستقل تلگرامی است که به‌عنوان یک عضو طبیعی در گروه‌ها فعالیت می‌کند؛ پیام‌ها را در محدوده‌ی مجاز می‌خواند، در زمان مناسب پاسخ می‌دهد، زمینه‌ی گفتگو را درک می‌کند و از حافظه‌های جداگانه برای شناخت بهتر گفتگوها استفاده می‌کند.
-
-Zero یک چت‌بات ساده یا بخشی از Hermes نیست. Listener، روتینگ مدل، حافظه، تنظیمات، لاگ‌ها، rate limit و پنل مدیریتی آن کاملاً مستقل نگه داشته شده‌اند.
-
-معماری Zero دو سطح جدا دارد:
-
-1. **Zero Listener** — یک Telegram user-session با Telethon برای حضور و پاسخ‌گویی در گروه‌های مجاز.
-2. **Zero Management Bot** — یک ربات مدیریتی محدود به Owner برای مشاهده‌ی وضعیت و کنترل سرویس.
-
----
-
-## ✨ ویژگی‌های کلیدی
-
-### 🧠 هسته‌ی هوش مصنوعی
-
-- پاسخ‌گویی طبیعی و کوتاه با پشتیبانی از فارسی و گفتگوهای گروهی
-- چند حالت شخصیتی: `normal`، `funny`، `sarcastic`، `serious`، `assistant`، `teacher` و `debate`
-- تشخیص trigger، پاسخ مستقیم، reply، interjection و پیام‌های شروع‌کننده‌ی گفتگو
-- روتینگ مستقل بین Gemini و OpenRouter
-- چرخش امن چند API Key با weighted LRU، کنترل quota، cooldown و fallback
-- retry و timeout برای خطاهای شبکه و provider
-- عدم ثبت secretها در state یا لاگ‌ها
-
-### 💾 حافظه‌ی چندلایه
-
-Zero حافظه‌ها را به‌صورت ماژولار نگه می‌دارد تا داده‌های مختلف با هم مخلوط نشوند:
-
-- حافظه‌ی کوتاه‌مدت پیام‌های اخیر
-- پروفایل و علایق کاربران
-- حافظه‌ی معنایی و حقایق تأییدشده
-- حافظه‌ی تجربه و روندهای قبلی
-- حافظه‌ی رویه‌ای برای الگوهای کاری
-- مدل جهان و زمینه‌ی گروه
-- خلاصه‌ی معنایی گفتگو و گزارش‌های دوره‌ای
-- هویت هر کاربر بر اساس ترکیب `chat_id` و `sender_id`
-- کنترل‌های فراموشی، اصلاح و محدودسازی حافظه
-
-### 👥 آگاهی اجتماعی گروه
-
-- شناخت اعضای گروه و زمینه‌ی تعامل‌های قبلی
-- پاسخ‌های محدود و کنترل‌شده به پیام‌های دیگر بات‌ها
-- رعایت opt-out برای تعاملات اجتماعی
-- تشخیص لحن و احساس کلی پیام
-- interjection تصادفی با فاصله‌ی زمانی و احتمال قابل تنظیم
-- پیام شروع‌کننده‌ی idle با محدودیت زمانی
-- جلوگیری از زنجیره‌ی بی‌پایان بات‌به‌بات
-
-### 🔎 جست‌وجو و دانش
-
-- مسیر جست‌وجوی وب با providerهای قابل تعویض
-- Google Grounding و SearXNG به‌عنوان مسیرهای قابل تنظیم
-- استخراج محتوای صفحات عمومی وب
-- cache، deduplication، ranking و محدودیت زمانی جست‌وجو
-- محافظ صحت پاسخ برای داده‌های عددی و قیمت‌های لحظه‌ای
-- جست‌وجوی تخصصی تلگرام در قالب ماژول مستقل و محدودشده
-- جلوگیری از نمایش نتیجه‌ی نامرتبط، لینک ناامن یا داده‌ی بدون منبع
-
-> قابلیت‌های جست‌وجوی وب و تلگرام به‌صورت configuration-driven فعال یا غیرفعال می‌شوند و در حالت عمومی پیش‌فرض باید با دقت بررسی شوند.
-
-### 📈 قیمت و بازار
-
-مسیرهای جداگانه برای منابع مختلف بازار:
-
-- Binance برای داده‌های کریپتو
-- Nobitex برای قیمت USDT و تومان
-- Navasan برای طلا و سکه
-
-داده‌ها cache می‌شوند، قیمت‌های غیرمنطقی رد می‌شوند و منبع پاسخ باید با نوع دارایی سازگار باشد.
-
-### 🖼️ رسانه، تصویر و استیکر
-
-- تشخیص و پردازش تصویر، GIF و sticker
-- پاسخ به پرسش‌های مرتبط با تصویر از طریق vision model
-- محدودیت حجم فایل و تعداد درخواست‌های رسانه‌ای
-- کتابخانه‌ی استیکر با دسته‌بندی، امتیاز کیفیت و انتخاب تصادفی
-- ذخیره‌ی کنترل‌شده‌ی استیکرهای مناسب
-- cooldown، سقف ساعتی و فاصله‌ی حداقل بین ارسال‌ها
-- رعایت بازخورد منفی کاربر و توقف موقت ارسال خودکار
-- جلوگیری از نشت marker داخلی استیکر در پاسخ نهایی
-
-### ⏰ یادآوری و کارهای زمان‌بندی‌شده
-
-- تشخیص درخواست‌های زمانی از زبان طبیعی
-- یادآوری‌های deferred با scope دقیق بر اساس گروه و کاربر
-- jobهای template-based با زمان‌بندی محدود و اعتبارسنجی‌شده
-- جلوگیری از اجرای job خارج از محدوده‌ی امنیتی
-- گزارش‌های دوره‌ای قابل تنظیم برای Owner
-
-### 📄 Office Agent
-
-- ساخت، خواندن و ویرایش محدود DOCX، XLSX و PPTX با OfficeCLI رسمی
-- فعال‌سازی فقط با فرمان صریح `/docx`، `/xlsx` یا `/pptx`
-- preflight امنیتی OOXML، سهمیه اتمیک، صف persistent و delivery idempotent
-- worker غیر-root بدون شبکه، validation، render و repair محدودشده
-- قابلیت پیش‌فرض غیرفعال است؛ راهنمای نصب و rollback: [`docs/office-agent.md`](docs/office-agent.md)
-
-## 🧭 مستندات معماری برای توسعه‌دهنده
-
-برای نقشه‌ی مستند و مبتنی بر source از [`docs/architecture/README.md`](docs/architecture/README.md) شروع کنید. این مجموعه مسیرهای runtime، import/call-site boundaries، storage، configuration، systemd، تست‌ها، محل مناسب تغییر و ابهام‌های شناخته‌شده را پوشش می‌دهد.
-
-### 👑 پنل مدیریت
-
-Zero یک Management Bot و پنل وب فارسی RTL دارد که برای کنترل سرویس طراحی شده است:
-
-- مشاهده‌ی وضعیت Listener
-- کنترل start، stop و restart
-- بررسی وضعیت providerها، مدل‌ها، key pool و cooldownها بدون نمایش secret
-- مشاهده‌ی آمار و لاگ‌های سرویس
-- مدیریت تنظیمات، حافظه و jobها از مسیرهای مجاز
-- ورود با Telegram OTP
-- session و کد تأیید به‌صورت خام در UI ذخیره نمی‌شوند
-- Cookie امن، CSRF، CSP و هدرهای امنیتی
-- اتصال پنل فقط از طریق reverse proxy و HTTPS در محیط production
-
-صفحات پنل فقط زمانی عملیات تغییر وضعیت انجام می‌دهند که API واقعی همان بخش آماده و تست شده باشد؛ عملیات جعلی یا داده‌ی placeholder عمداً استفاده نمی‌شود.
-
----
-
-## 🏗️ معماری فنی
-
-```text
-                         Telegram
-                    ┌────────┴────────┐
-                    │                 │
-          User Session / MTProto   Management Bot
-              Zero Listener          Owner-only Bot
-                    │                 │
-                    └────────┬────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │   Zero Core      │
-                    │ Brain + Policies │
-                    └───────┬──────────┘
-                            │
-        ┌───────────────────┼───────────────────┐
-        ▼                   ▼                   ▼
-  Independent Router   Memory Layer        Tool Layer
-  Gemini/OpenRouter   SQLite + Modules     Web/Vision/Market
-        │                   │                   │
-        └───────────────────┴───────────────────┘
-                            │
-                       Runtime State
-                    DB / Logs / Sessions
-
-Browser ──HTTPS──▶ Reverse Proxy ──loopback──▶ Panel API ──▶ Zero Services
-```
-
-### پشته‌ی فناوری
-
-- **Language:** Python 3.11+
-- **Telegram Listener:** Telethon
-- **Management Bot:** aiogram
-- **AI Providers:** Gemini و OpenRouter
-- **Storage:** SQLite با aiosqlite
-- **Configuration:** YAML با Pydantic validation
-- **Web Panel:** رابط فارسی RTL با API داخلی
-- **Runtime:** Linux و systemd
-- **Testing:** pytest و pytest-asyncio
-
----
-
-## 🔒 امنیت و جداسازی
-
-- Listener فقط در گروه‌های allowlist‌شده فعالیت می‌کند.
-- دسترسی Management Bot فقط برای Owner در چت خصوصی مجاز است.
-- توکن‌ها، API keyها، sessionها و فایل‌های secret خارج از README و فایل‌های عمومی نگه داشته می‌شوند.
-- secretها با شناسه‌ی hash‌شده در وضعیت provider نمایش داده می‌شوند، نه مقدار واقعی.
-- لاگ‌ها نباید شامل token، key، session، مسیر خصوصی یا محتوای حساس باشند.
-- برای پیام‌های هم‌زمان گروه، مسیرهای state و memory باید اتمیک و کنترل‌شده باشند.
-- rate limit در سطح کاربر، گروه، provider، رسانه و تعاملات اجتماعی اعمال می‌شود.
-- سرویس‌های systemd با کاربر محدود، `NoNewPrivileges`، filesystem protection و مسیرهای write محدود اجرا می‌شوند.
-- پنل production باید پشت HTTPS و reverse proxy باشد.
-
----
-
-## 🚀 راه‌اندازی
-
-### پیش‌نیازها
-
-- Python 3.11 یا بالاتر
-- یک Telegram user account اختصاصی برای Listener
-- `api_id` و `api_hash` تلگرام
-- یک Management Bot از BotFather
-- حداقل یک API key برای Gemini یا OpenRouter
-- در صورت نیاز: سرویس SearXNG، Google Grounding و منابع بازار
-
-### نصب وابستگی‌ها
-
-```bash
-git clone git@github.com:mhrsdev/ZeroAgent.git
-cd ZeroAgent
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### تنظیمات
-
-فایل نمونه را کپی کنید و فقط مقادیر محیط خودتان را وارد کنید:
-
-```bash
-cp config/zero.example.yaml config/zero.yaml
-```
-
-مقادیر حساس را در فایل secret جداگانه و خارج از repository قرار دهید. این فایل‌ها را هرگز commit نکنید:
-
-```text
-config/zero.yaml
-runtime/secrets/
-runtime/state/
-runtime/logs/
-*.session
-.env
-```
-
-تنظیمات اصلی شامل این بخش‌هاست:
-
-- Owner و دسترسی Management Bot
-- Telegram Listener و گروه‌های مجاز
-- Persona و triggerها
-- policy و rate limit
-- providerها و quotaها
-- حافظه و SQLite
-- web search و Telegram search
-- vision، sticker و reaction policy
-- مسیر لاگ‌ها
-- Office Agent، quota، sandbox و retention
-
-### آماده‌سازی دیتابیس
-
-```bash
-python scripts/init_db.py
-```
-
-### اجرای Listener
-
-```bash
-python scripts/run_listener.py
-```
-
-### اجرای پنل و Management Bot
-
-```bash
-export ZERO_CONFIG_PATH=/path/to/zero.yaml
-export ZERO_PANEL_HOST=127.0.0.1
-export ZERO_PANEL_PORT=8787
-python scripts/run_panel.py
-```
-
-در production، Listener و Panel را با systemd اجرا کنید و پنل را مستقیماً روی اینترنت expose نکنید؛ از reverse proxy و HTTPS استفاده کنید.
-
----
-
-## 💬 تعامل با Zero
-
-Zero برای کار در گروه طراحی شده و معمولاً با این روش‌ها فعال می‌شود:
-
-- reply مستقیم به پیام Zero
-- mention یا trigger تعریف‌شده
-- پرسش واضح در گروه
-- درخواست جست‌وجو، قیمت، یادآوری یا توضیح تصویر
-- درخواست تغییر حالت گفتگو، در صورت مجاز بودن
-
-رفتارهای خودکار مثل interjection، idle starter، sticker و reaction با policy و cooldown کنترل می‌شوند و نباید به‌عنوان پاسخ قطعی یا دائمی در نظر گرفته شوند.
-
----
-
-## 📂 ساختار پروژه
-
-```text
-zero/
-├── zero/                    # هسته‌ی اصلی
-│   ├── brain.py             # تصمیم‌گیری و پردازش پاسخ
-│   ├── router.py            # روتینگ مستقل providerها
-│   ├── storage.py           # SQLite و state persistence
-│   ├── memory.py            # استخراج و خلاصه‌سازی حافظه
-│   ├── semantic_memory.py   # حافظه‌ی معنایی
-│   ├── experience_memory.py # حافظه‌ی تجربه
-│   ├── procedural_memory.py # حافظه‌ی رویه‌ای
-│   ├── world_model.py       # مدل زمینه‌ی جهان/گروه
-│   ├── social.py            # تعاملات اجتماعی
-│   ├── reactions.py         # reaction policy
-│   ├── vision.py            # تصویر، GIF و vision
-│   ├── knowledge.py         # worker دانش و اعتبارسنجی منبع
-│   ├── web.py               # لایه‌ی جست‌وجوی وب
-│   ├── telegram_search.py   # جست‌وجوی تلگرام
-│   ├── market_prices.py     # منابع قیمت بازار
-│   ├── template_jobs.py     # jobهای زمان‌بندی‌شده
-│   ├── panel_api.py         # API پنل مدیریت
-│   └── config.py            # بارگذاری و اعتبارسنجی config
-├── scripts/
-│   ├── run_listener.py      # اجرای Listener
-│   ├── run_panel.py         # اجرای Panel و Management Bot
-│   └── init_db.py           # آماده‌سازی دیتابیس
-├── panel/                   # رابط وب فارسی RTL
-├── config/
-│   └── zero.example.yaml   # تنظیمات نمونه بدون secret
-├── docs/
-│   └── zero-panel.md       # مستندات پنل و deployment
-├── tests/                   # تست‌های focused
-├── runtime/                 # state و log؛ عمومی نیست
-├── requirements.txt
-└── pyproject.toml
-```
-
----
-
-## 🧪 تست
-
-```bash
-pytest
-```
-
-برای بررسی type و syntax نیز می‌توانید از ابزارهای استاندارد Python استفاده کنید. تست‌های موجود بخش‌هایی مانند router، memory، search، policy، template jobs، market routing و integration را پوشش می‌دهند.
-
----
-
-## ⚙️ اجرای production
-
-نمونه‌ی سرویس‌های systemd در مسیر `deploy/` قرار دارند. قبل از فعال‌سازی:
-
-- secretها و permission فایل‌ها را بررسی کنید.
-- user اختصاصی سرویس و مسیرهای write را تنظیم کنید.
-- گروه‌ها و کاربران مجاز را صریحاً در allowlist قرار دهید.
-- پنل را فقط روی loopback bind کنید.
-- HTTPS، reverse proxy، firewall و log rotation را فعال کنید.
-- قبل از هر migration یا تغییر حساس، backup رمزنگاری‌شده و قابل‌تأیید تهیه کنید.
-- لاگ‌ها را از نظر نشت secret و داده‌ی شخصی بررسی کنید.
-
----
-
-## 🛡️ مالکیت و فایل‌های محلی
-
-این پروژه اختصاصی است و تحت `PROPRIETARY_LICENSE` با عبارت **All Rights Reserved** ارائه می‌شود. هرگونه استفاده، کپی، تغییر، انتشار، استقرار یا توزیع بدون اجازه‌ی کتبی مالک ممنوع است.
-
-فایل‌های زیر عمداً بخشی از مخزن نیستند و باید فقط روی محیط امن اجرا نگه‌داری شوند:
-
-- `.env` و فایل‌های تنظیمات واقعی
-- `runtime/` شامل دیتابیس، memory، session، log و state
-- `backups/`، `archive/` و خروجی‌های فشرده یا رمزنگاری‌شده
-- کلیدها، passwordها، tokenها و API keyها
-- داده‌های واقعی کاربران و خروجی‌های runtime
-
-برای شروع، از `config/zero.example.yaml` کپی بگیرید، مسیرها و شناسه‌های محیط خودتان را تنظیم کنید و secretها را خارج از repository قرار دهید. `.env.example` فقط فهرست نام متغیرهای محیطی را دارد و هیچ مقدار واقعی در آن نیست.
-
-## 📜 License
-
-See [`PROPRIETARY_LICENSE`](PROPRIETARY_LICENSE). This repository is not open-source and no rights are granted without the owner's prior written permission.
-
----
-
-<p align="center">
-  Built for focused, natural and safer Telegram interaction.
-</p>
+The repository contains both an Apache License 2.0 text in [`LICENSE`](LICENSE) and a conflicting all-rights-reserved notice in [`PROPRIETARY_LICENSE`](PROPRIETARY_LICENSE), while [`NOTICE`](NOTICE) also describes Apache licensing. This is unresolved in the current HEAD. This README does not declare the project open source or grant permission to use, copy, modify, deploy, or redistribute it. Obtain a written licensing decision from the copyright holder before publishing or using the project.
