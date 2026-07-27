@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Zero Telegram source joiner with bounded jitter
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=10min
+RandomizedDelaySec=240
+Persistent=true
+Unit=zero-tg-source-join.service
+
+[Install]
+WantedBy=timers.target

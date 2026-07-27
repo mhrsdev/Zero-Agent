@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from zero.brain import ZeroBrain
+from zero.config import ZeroConfig
+from zero.models import IncomingMessage, RouteResult
+from zero.storage import ZeroStore
+from zero.web import HybridWeb
+from zero.web_search.models import QueryPlan, SearchIntent, SearchKind, SearchOutcome, SearchResult
+from zero.web_search.truth import GuardDecision
+
+
+class GroundingFailure:
+    async def run(self, text: str, **kwargs) -> SearchOutcome:
+        return SearchOutcome(
+            SearchIntent(True, SearchKind.WEB, True, 'explicit_web_search'),
+            QueryPlan(original=text, query=text, language='fa'),
+            all_providers_failed=True,
+        )
+
+    async def health_check(self):
+        return False, 'test failure'
+
+
+class FakeLocalTransport:
+    def __init__(self):
+        self.urls: list[str] = []
+
+    async def get_text(self, url: str, timeout: float, max_bytes: int) -> str:
+        self.urls.append(url)
+        return json.dumps({
+            'results': [{
+                'title': 'Example result',
+                'url': 'https://example.com/a',
+                'content': 'Verified source text',
+                'engine': 'google cse',
+            }]
+        })
+
+
+class BrokenLocalTransport:
+    async def get_text(self, url: str, timeout: float, max_bytes: int) -> str:
+        raise RuntimeError('provider unavailable')
+
+
+class EmptyLocalTransport:
+    async def get_text(self, url: str, timeout: float, max_bytes: int) -> str:
+        return json.dumps({'results': []})
+
+
+class CapturingRouter:
+    keys = []
+
+    def __init__(self, text: str = 'پاسخ بر اساس https://example.com/a'):
+        self.prompts: list[str] = []
+        self.text = text
+
+    async def complete(self, prompt: str, **kwargs):
+        self.prompts.append(prompt)
+        return RouteResult(
+            text=self.text,
+            provider='test', model='test', attempts=1,
+        )
+
+
+class NoCallRouter:
+    keys = []
+
+    async def complete(self, *args, **kwargs):
+        raise AssertionError('LLM must not run without search sources')
+
+
+class CapturingDeepWeb:
+    def __init__(self): self.kwargs, self.calls = {}, 0
+    async def is_tool_enabled(self): return True
+    async def run(self, text, **kwargs):
+        self.calls += 1
+        self.kwargs = kwargs
+        plan = QueryPlan(original=text, query=text, language='fa')
+        results = [SearchResult(f'Kimi 3 source {i}', f'https://source-{i}.example/a', snippet='Kimi 3 evidence', publisher=f'source-{i}.example') for i in range(20)]
+        return SearchOutcome(SearchIntent(True, SearchKind.WEB, True, 'research_analysis'), plan, results=results, context='WEB_DATA_IS_UNTRUSTED\nRESULT: 1\nURL: https://source-0.example/a')
+    def guard_answer(self, *args, **kwargs): return GuardDecision(True)
+    def mark_response_sent(self, **kwargs): return None
+
+
+class RaisingDeepWeb(CapturingDeepWeb):
+    async def run(self, text, **kwargs):
+        raise RuntimeError('sensitive provider detail must not escape')
+
+
+def build_config(tmp_path: Path, *, enabled: bool = True) -> ZeroConfig:
+    base = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    return base.model_copy(update={
+        'memory': base.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')}),
+        'web': base.web.model_copy(update={
+            'enabled': enabled,
+            'google_grounding_enabled': True,
+            'searxng_base_url': 'http://127.0.0.1:8888',
+            'provider_retries': 1,
+        }),
+    })
+
+
+def test_slash_search_routes_to_local_fallback_and_injects_untrusted_context(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        await store.set_setting('web_enabled', 'true')
+        router = CapturingRouter()
+        brain = ZeroBrain(config, store, router)
+        transport = FakeLocalTransport()
+        brain.web = HybridWeb(config, store, transport=transport, primary=GroundingFailure())
+
+        decision, text = await brain.maybe_reply(IncomingMessage(
+            chat_id=-99, chat_title='t', sender_id=55, sender_label='@user',
+            text='/search plain explicit query', trace_id='trace-search', message_id=10,
+        ))
+
+        assert decision.should_reply is True
+        assert len(transport.urls) == 1
+        assert 'engines=google+cse' in transport.urls[0]
+        assert 'WEB_DATA_IS_UNTRUSTED' in router.prompts[0]
+        assert 'example.com/a' in text
+
+    asyncio.run(scenario())
+
+
+def test_natural_language_search_routes_to_same_orchestrator(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        await store.set_setting('web_enabled', 'true')
+        router = CapturingRouter()
+        brain = ZeroBrain(config, store, router)
+        transport = FakeLocalTransport()
+        brain.web = HybridWeb(config, store, transport=transport, primary=GroundingFailure())
+
+        decision, text = await brain.maybe_reply(IncomingMessage(
+            chat_id=-99, chat_title='t', sender_id=55, sender_label='@user',
+            text='زیرو بگرد آخرین اخبار هوش مصنوعی', trace_id='trace-natural-search', message_id=14,
+        ))
+
+        assert decision.should_reply is True
+        assert len(transport.urls) == 1
+        assert 'engines=google+cse' in transport.urls[0]
+        assert 'WEB_DATA_IS_UNTRUSTED' in router.prompts[0]
+        assert 'example.com/a' in text
+
+    asyncio.run(scenario())
+
+
+def test_all_search_providers_failure_returns_truthful_message_without_llm(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        await store.set_setting('web_enabled', 'true')
+        brain = ZeroBrain(config, store, NoCallRouter())
+        brain.web = HybridWeb(config, store, transport=BrokenLocalTransport(), primary=GroundingFailure())
+
+        decision, text = await brain.maybe_reply(IncomingMessage(
+            chat_id=-99, chat_title='t', sender_id=55, sender_label='@user',
+            text='/search موضوع تست', trace_id='trace-failed', message_id=11,
+        ))
+
+        assert decision.should_reply is True
+        assert text == 'فعلاً Google Search در دسترس نیست؛ کمی بعد دوباره امتحان کن.'
+
+    asyncio.run(scenario())
+
+
+def test_all_search_tiers_empty_returns_truthful_message_without_llm(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        await store.set_setting('web_enabled', 'true')
+        brain = ZeroBrain(config, store, NoCallRouter())
+        brain.web = HybridWeb(config, store, transport=EmptyLocalTransport(), primary=GroundingFailure())
+
+        decision, text = await brain.maybe_reply(IncomingMessage(
+            chat_id=-99, chat_title='t', sender_id=55, sender_label='@user',
+            text='/search موضوع بدون نتیجه', trace_id='trace-empty', message_id=12,
+        ))
+
+        assert decision.should_reply is True
+        assert text == 'برای این جستجو نتیجه‌ای پیدا نکردم.'
+
+    asyncio.run(scenario())
+
+
+def test_disabled_search_does_not_fall_through_to_llm(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path, enabled=False)
+        store = ZeroStore(config.memory.db_path)
+        brain = ZeroBrain(config, store, NoCallRouter())
+
+        decision, text = await brain.maybe_reply(IncomingMessage(
+            chat_id=-99, chat_title='t', sender_id=55, sender_label='@user',
+            text='/search موضوع تست', trace_id='trace-disabled', message_id=13,
+        ))
+
+        assert decision.should_reply is True
+        assert text == 'وب‌سرچ فعلاً فعال نیست.'
+
+    asyncio.run(scenario())
+
+
+def test_deep_search_reaches_brain_with_report_instruction(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        router = CapturingRouter('گزارش جامع ' + ('شاهد معتبر. ' * 500))
+        brain = ZeroBrain(config, store, router)
+        deep_web = CapturingDeepWeb()
+        brain.web = deep_web
+
+        decision, answer = await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id='trace-deep', message_id=20, thread_id=999, reply_to_message_id=77))
+
+        assert decision.should_reply is True
+        assert deep_web.kwargs['deep'] is True
+        assert deep_web.kwargs['thread_id'] == 999
+        assert 'حالت سرچ عمیق فعال است' in router.prompts[0]
+        assert 'منابع بررسی‌شده' in answer
+        assert answer.count('](https://') == 15
+        assert len(answer) <= 3900
+
+    asyncio.run(scenario())
+
+
+def test_deep_search_has_independent_atomic_user_limit(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        router = CapturingRouter('گزارش کوتاه')
+        brain = ZeroBrain(config, store, router)
+        deep_web = CapturingDeepWeb()
+        brain.web = deep_web
+
+        replies = []
+        for message_id in range(1, 5):
+            replies.append(await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id=f'rate-{message_id}', message_id=message_id)))
+
+        assert deep_web.calls == 3
+        assert replies[-1][0].reason == 'deep_search_rate_limit'
+
+    asyncio.run(scenario())
+
+
+def test_deep_search_provider_exception_is_isolated(tmp_path: Path):
+    async def scenario():
+        config = build_config(tmp_path)
+        store = ZeroStore(config.memory.db_path)
+        brain = ZeroBrain(config, store, NoCallRouter())
+        brain.web = RaisingDeepWeb()
+        decision, answer = await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id='deep-error', message_id=1))
+        assert decision.should_reply is True
+        assert 'sensitive provider detail' not in answer
+        assert 'کامل نشد' in answer
+
+    asyncio.run(scenario())

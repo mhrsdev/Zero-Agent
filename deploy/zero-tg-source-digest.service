@@ -1,0 +1,13 @@
+[Unit]
+Description=Zero Telegram World Model digest
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=zero
+Group=zero
+WorkingDirectory=/root/zero
+ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/tg_source_manager.py digest
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

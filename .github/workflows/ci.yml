@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "open-source/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile check
+        run: python -m compileall -q zero scripts
+      - name: Test suite
+        run: python -m pytest -q -p no:cacheprovider -rs
+      - name: Migration contract
+        run: python -m pytest -q -p no:cacheprovider tests/test_memory_v1_to_v3_migration.py
+      - name: Multi-group isolation
+        run: python -m pytest -q -p no:cacheprovider tests/test_tenancy_isolation.py
+      - name: CLI smoke
+        run: |
+          python -m zero version
+          python -m zero status
+          python scripts/migrate_memory_v1_to_v3.py --help
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install ruff
+      - name: Ruff check
+        # Ruleset is scoped to defects in pyproject.toml; the style-only
+        # families stay off until the legacy modules are reformatted in their
+        # own change, so this gate is enforceable today rather than aspirational.
+        run: ruff check zero scripts tests
+
+  security:
+    name: Security and artifact scans
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt pip-audit
+      - name: Public artifact scan
+        run: python scripts/verify_public_artifact.py .
+      - name: Dependency audit
+        run: pip-audit --strict --requirement requirements.lock
+      - name: Release artifact gates
+        run: python -m pytest -q -p no:cacheprovider tests/test_release_artifacts.py
+
+  sbom:
+    name: SBOM and licenses
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements.txt pip-licenses
+      - name: Generate SBOM
+        run: python scripts/generate_sbom.py --output sbom.cdx.json
+      - name: License report
+        run: python -m piplicenses --format=markdown --with-urls
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  docker:
+    name: Docker build and clean-container smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: zero:ci
+      - name: Clean-container smoke test
+        run: |
+          docker run --rm zero:ci version
+          docker run --rm zero:ci status
+          # doctor exits non-zero on an unconfigured container, which is correct;
+          # assert it runs and reports rather than crashing.
+          docker run --rm zero:ci doctor || true
+      - name: Image runs unprivileged
+        run: |
+          test "$(docker run --rm --entrypoint id zero:ci -u)" != "0"

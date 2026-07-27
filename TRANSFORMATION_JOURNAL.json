@@ -1,0 +1,137 @@
+[
+  {
+    "phase": 0,
+    "status": "PASS",
+    "commit": "f9588ec6588299a04d29561c9b4c8415c54e9507",
+    "tests": ["encrypted archive", "isolated restore", "5 SQLite integrity checks", "production unchanged"]
+  },
+  {
+    "phase": 1,
+    "status": "PASS",
+    "commit": "23f1a08",
+    "tests": ["clean scanner fixture: 0 findings", "unsafe scanner fixture: 2 findings"]
+  },
+  {
+    "phase": 2,
+    "status": "PASS",
+    "commit": "f81bc8f",
+    "tests": ["RequestContext targeted: 4 passed", "full suite at checkpoint: 572 passed, 1 skipped"]
+  },
+  {
+    "phase": 3,
+    "status": "PARTIAL",
+    "commit": "b9e75c8",
+    "changes": ["strict typed configuration models", "atomic ConfigStore", "symbolic secret refs", "SetupService validation"]
+  },
+  {
+    "milestone": "memory-boundary",
+    "status": "PARTIAL",
+    "commit": "110311d",
+    "changes": ["MemoryService boundary backed by Memory V3"],
+    "known_issue": "legacy V1/V3 runtime composition remains until migration and compatibility behavior are completed"
+  },
+  {
+    "milestone": "cli",
+    "status": "PARTIAL",
+    "commit": "455ddbc",
+    "changes": ["zero version", "zero status", "zero config show"]
+  },
+  {
+    "checkpoint": "0856cc2",
+    "tests": ["panel/setup targeted: 8 passed", "full suite: 587 passed, 1 skipped"],
+    "changes": ["PanelStore accepts shared SetupService", "Telegram setup writes canonical symbolic refs", "invalid setup cannot advance", "resource-sensitive knowledge test made deterministic"],
+    "production_changed": false,
+    "main_changed": false
+  },
+  {
+    "milestone": "memory-v3-only-runtime",
+    "status": "PASS",
+    "commit": "a58c83b",
+    "changes": ["normal brain and vision prompt paths retrieve through MemoryService backed by V3", "V2 environment variables cannot select the V3 runtime", "normal V1 runtime flag disabled", "monthly group summaries write canonical V3 group items", "obsolete V1/V2 shadow prompt expectations replaced with V3-only regressions"],
+    "tests": ["targeted: 8 passed", "full: 588 passed, 1 skipped", "py_compile: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "next": "direct V1-to-V3 migration contract"
+  },
+  {
+    "milestone": "direct-v1-to-v3-contract",
+    "status": "PARTIAL",
+    "commit": "4b15d19",
+    "changes": ["direct long_term_memory mapper", "backup SHA-256 precondition", "dry-run/apply/verify/rollback API", "quarantine", "idempotent run map", "fault-injected interruption resume"],
+    "tests": ["migration contract: 1 passed", "full: 589 passed, 1 skipped", "CLI help: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "remaining V1 tables and complete source/target reporting are not yet mapped",
+    "next": "direct V1-to-V3 migration contract"
+  },
+  {
+    "milestone": "direct-v1-to-v3-medium-term",
+    "status": "PARTIAL",
+    "commit": "8039e9e",
+    "changes": ["direct medium_term_memory mapper", "group-scoped participant/source provenance", "quarantine, resume and rollback coverage"],
+    "tests": ["migration contract: 2 passed", "full: 590 passed, 1 skipped", "diff-check: passed", "compileall: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "semantic/profile/notes, social state, RAG/archive and other approved V1 sources remain unmapped",
+    "next": "direct semantic_user_memory mapping"
+  },
+  {
+    "milestone": "direct-v1-to-v3-semantic",
+    "status": "PARTIAL",
+    "commit": "29c995a",
+    "changes": ["direct semantic_user_memory mapper", "personal identity/value/evidence provenance", "invalid JSON and ambiguous identity quarantine"],
+    "tests": ["migration contract: 3 passed", "full: 591 passed, 1 skipped", "diff-check: passed", "compileall: passed"],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "remaining approved V1 tables and complete source/target reporting are not mapped",
+    "next": "await correct Opus checkpoint comparison"
+  },
+  {
+    "milestone": "opus-checkpoint-reconciliation",
+    "status": "PARTIAL",
+    "commit": "57f2693",
+    "changes": [
+      "integrated scoped tenancy registry primitives with real-path adaptation",
+      "integrated provider registry primitives",
+      "integrated Docker/CI/SBOM/licensing/lockfile release infrastructure",
+      "updated planning and tracking documents to real repository evidence"
+    ],
+    "tests": [
+      "tenancy targeted: 32 passed",
+      "provider targeted: 24 passed",
+      "full: 650 passed, 1 skipped",
+      "compileall: passed",
+      "diff-check: passed"
+    ],
+    "rejected": [
+      "Opus release-artifact test: assumes sanitized public tree and fails against real private repository; not weakened or included"
+    ],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "tenancy and provider primitives are not yet wired into production call graphs",
+    "next": "P0-1 listener tenancy binding and group isolation"
+  },
+  {
+    "milestone": "p0-1-listener-tenancy-binding",
+    "status": "PARTIAL",
+    "commit": "bb8d56d",
+    "changes": [
+      "resolve and validate a group Scope per inbound listener message",
+      "bind MemoryService to the resolved scope",
+      "seed configured groups as ACTIVE tenancy records",
+      "remove first-group routing and make starter/interject cooldowns group-scoped",
+      "make panel primary-group fallback fail closed when ambiguous"
+    ],
+    "tests": [
+      "P0 targeted: 31 passed",
+      "full: 652 passed, 1 skipped",
+      "compileall: passed",
+      "diff-check: passed",
+      "source first-group guard: passed"
+    ],
+    "production_changed": false,
+    "main_changed": false,
+    "known_gap": "wrong-thread delivery and jobs/files/quotas/panel end-to-end scope proof remain open",
+    "next": "P0-2 runtime isolation adversarial tests and remaining delivery paths"
+  }
+]
