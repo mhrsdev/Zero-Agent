@@ -131,6 +131,39 @@ class NavasanPriceClient:
         return (await self.get_prices((item,)))[item]
 
 
+class MilliGoldPriceClient:
+    BASE_URL = 'https://milli.gold/api/v1/public/milli-price/external'
+
+    async def get_price(self, item: str = '18ayar') -> dict[str, Any]:
+        if str(item or '').strip().lower() != '18ayar':
+            raise PriceAPIError('Milli Gold فقط قیمت طلای ۱۸ عیار را ارائه می‌کند.')
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(self.BASE_URL, headers={'Accept': 'application/json'}) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise PriceAPIError('Milli Gold فعلاً پاسخ نداد.') from exc
+        if data.get('code') != 0 or not isinstance(data.get('data'), dict):
+            raise PriceAPIError('Milli Gold پاسخ معتبر نداد.')
+        row = data['data']
+        try:
+            raw_value = Decimal(str(row['price18']))
+        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+            raise PriceAPIError('قیمت طلای ۱۸ عیار Milli Gold معتبر نیست.') from exc
+        if not raw_value.is_finite() or raw_value <= 0:
+            raise PriceAPIError('قیمت طلای ۱۸ عیار Milli Gold معتبر نیست.')
+        # Milli's public API returns rial per milli; Zero reports toman per milli.
+        value = raw_value / Decimal('10')
+        return {
+            'asset': '18ayar', 'value': str(value), 'unit': 'تومان',
+            'market_type': 'Iran market', 'source': 'Milli Gold API',
+            'source_url': self.BASE_URL, 'change': None,
+            'weight': '1 میلی‌گرم', 'raw_value': str(raw_value), 'raw_unit': 'ریال',
+            'updated_at': row.get('date'), 'cached': False,
+        }
+
+
 class TGJUWebPriceClient:
     """Read a public TGJU profile as a last-resort web fallback."""
     BASE_URL = 'https://www.tgju.org/profile/'
@@ -174,7 +207,7 @@ class TGJUWebPriceClient:
 
 
 class NobitexPriceClient:
-    BASE_URL = 'https://api.nobitex.ir/v2/orderbook/USDTIRT'
+    BASE_URL = 'https://apiv2.nobitex.ir/v3/orderbook/USDTIRT'
     CACHE_TTL = 5.0
 
     def __init__(self) -> None:
@@ -192,10 +225,23 @@ class NobitexPriceClient:
             raise PriceAPIError('نوبیتکس فعلاً پاسخ نداد.') from exc
         if data.get('status') != 'ok': raise PriceAPIError('نوبیتکس پاسخ معتبر نداد.')
         try:
-            ask = Decimal(str(data['asks'][0][0])); bid = Decimal(str(data['bids'][0][0]))
+            bid = Decimal(str(data['bids'][0][0]))
+            ask = Decimal(str(data['asks'][0][0]))
+            last_trade = Decimal(str(data['lastTradePrice']))
+            last_update = int(data['lastUpdate'])
         except (KeyError, IndexError, InvalidOperation, TypeError, ValueError) as exc:
             raise PriceAPIError('order book نوبیتکس ناقص یا نامعتبر است.') from exc
-        if not ask.is_finite() or not bid.is_finite() or ask < 0 or bid < 0: raise PriceAPIError('قیمت نوبیتکس معتبر نیست.')
-        result = {'asset': 'USDT', 'buy_price_toman': str(ask), 'sell_price_toman': str(bid), 'average_price_toman': str((ask + bid) / 2), 'unit': 'تومان', 'market_type': 'Nobitex order book', 'source': 'Nobitex API', 'updated_at': datetime.now(timezone.utc).isoformat(), 'cached': False}
+        if (not ask.is_finite() or not bid.is_finite() or not last_trade.is_finite()
+                or ask < 0 or bid < 0 or last_trade <= 0 or last_update <= 0):
+            raise PriceAPIError('قیمت نوبیتکس معتبر نیست.')
+        result = {
+            'asset': 'USDT', 'buy_price_toman': str(bid), 'sell_price_toman': str(ask),
+            'average_price_toman': str((ask + bid) / 2), 'last_trade_price_toman': str(last_trade),
+            'last_update_ms': last_update, 'unit': 'تومان',
+            'market_type': 'Nobitex order book', 'source': 'Nobitex API v3',
+            'source_url': self.BASE_URL,
+            'updated_at': datetime.fromtimestamp(last_update / 1000, timezone.utc).isoformat(),
+            'cached': False,
+        }
         self._cache = _CachedPrice(time.monotonic() + self.CACHE_TTL, result)
         return result

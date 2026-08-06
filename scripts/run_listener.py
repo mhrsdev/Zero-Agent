@@ -146,10 +146,11 @@ async def main() -> None:
         except Exception as exc:
             logger.warning('MEMORY_SHORT_SKIPPED trace_id=startup chat_id=%s reason=%s exception_type=%s', rebuild_chat_id, type(exc).__name__, type(exc).__name__)
     for tenancy_chat_id in sorted(rebuild_chat_ids):
-        group_id = f"telegram:{tenancy_chat_id}"
+        group_id = f"telegram_{tenancy_chat_id}"
         discovered = tenancy.discover_group(installation_id, group_id, platform_chat_id=tenancy_chat_id)
         owner_scope = Scope(installation_id, group_id, int(me.id))
-        tenancy.add_member(owner_scope, int(me.id), Role.OWNER)
+        if tenancy.role_of(owner_scope, int(me.id)) is None:
+            tenancy.add_member(owner_scope, int(me.id), Role.OWNER, actor_id=int(me.id), bootstrap=True)
         if discovered.state is GroupState.PENDING:
             tenancy.set_group_state(owner_scope, GroupState.ACTIVE)
     reactions = ReactionService(config, store, client, int(me.id), social_awareness=awareness)
@@ -157,11 +158,26 @@ async def main() -> None:
     request_logger = setup_logger('zero.requests', '/root/zero/runtime/logs/requests.log')
     account_scope = str(config.listener.session_path)
 
+    def _ensure_group_member(chat_id: int, user_id: int) -> None:
+        group_scope = Scope(installation_id, f'telegram_{int(chat_id)}', int(me.id))
+        if tenancy.role_of(group_scope, int(user_id)) is None:
+            tenancy.add_member(group_scope, int(user_id), Role.MEMBER, actor_id=int(me.id))
+            logger.info('TENANCY_MEMBER_AUTO_SEATED chat_id=%s user_id=%s role=member', chat_id, user_id)
+
+    def _serving_chat(chat_id: int) -> bool:
+        try:
+            scope = tenancy.resolve_scope(installation_id, platform_chat_id=int(chat_id))
+            tenancy.require_serving(scope)
+            return True
+        except Exception as exc:
+            logger.info('OUTBOUND_SKIPPED chat_id=%s reason=tenancy_not_serving exception_type=%s', chat_id, type(exc).__name__)
+            return False
+
     last_event_at = time.monotonic()
     # ponytail: global lock; use per-chat locks if Zero serves multiple busy groups.
     message_lock = asyncio.Lock()
 
-    async def _on_message(event):
+    async def _on_message(event, *, reprocess: bool = False):
         nonlocal last_event_at
         last_event_at = time.monotonic()
         trace_id = str(uuid.uuid4())[:8]
@@ -196,7 +212,7 @@ async def main() -> None:
             claim = await store.reserve_incoming_message(
                 platform='telegram', account_scope=account_scope,
                 chat_id=int(event.chat_id or 0), message_id=message_id,
-                thread_id=None, sender_id=int(event.sender_id or 0), trace_id=trace_id,
+                thread_id=None, sender_id=int(event.sender_id or 0), trace_id=trace_id, reprocess=reprocess,
             )
             if not claim['claimed']:
                 logger.info('DUPLICATE_MESSAGE_SKIPPED platform=telegram account_scope=%s chat_id=%s message_id=%s status=%s original_trace_id=%s trace_id=%s', account_scope, event.chat_id, message_id, claim['status'], claim.get('trace_id', '-'), trace_id)
@@ -301,7 +317,7 @@ async def main() -> None:
             account_scope=account_scope,
             platform='telegram',
             telegram_chat_id=int(event.chat_id or 0),
-            internal_group_id=f'telegram:{int(event.chat_id or 0)}',
+            internal_group_id=f'telegram_{int(event.chat_id or 0)}',
             sender_id=int(event.sender_id or 0),
             thread_id=thread_id,
             message_id=int(getattr(event, 'id', 0) or 0),
@@ -354,6 +370,13 @@ async def main() -> None:
             *_request_log_fields(incoming.text),
         )
 
+        if not incoming.sender_is_bot:
+            try:
+                _ensure_group_member(incoming.chat_id, incoming.sender_id)
+            except Exception:
+                logger.exception('TENANCY_MEMBER_AUTO_SEAT_FAILED chat_id=%s user_id=%s', incoming.chat_id, incoming.sender_id)
+                request_logger.info('TRACE=%s SKIP reason=tenancy_membership_unavailable sender=%s', trace_id, incoming.sender_id)
+                return
         await store.record_group_user_message(incoming.sender_id, incoming.chat_id, incoming.sender_label)
         if not incoming.sender_is_bot:
             await brain.social_plus.observe(
@@ -464,9 +487,19 @@ async def main() -> None:
             await store.set_setting(f'last_interject_at:{int(incoming.chat_id)}', str(time.time()))
 
     @client.on(events.NewMessage)
-    async def on_message(event):
+    async def on_message(event, *, reprocess: bool = False):
         async with message_lock:
-            await _on_message(event)
+            try:
+                await _on_message(event, reprocess=reprocess)
+            except Exception as exc:
+                chat_id = int(getattr(event, 'chat_id', 0) or 0)
+                message_id = int(getattr(event, 'id', 0) or 0)
+                logger.exception('MESSAGE_HANDLER_FAILED chat_id=%s message_id=%s exception_type=%s', chat_id, message_id, type(exc).__name__)
+                if message_id:
+                    await store.mark_incoming_message_failed(
+                        platform='telegram', account_scope=account_scope, chat_id=chat_id,
+                        message_id=message_id, trace_id='handler-boundary', reason=type(exc).__name__,
+                    )
 
     @client.on(events.MessageEdited)
     async def on_message_edited(event):
@@ -483,7 +516,7 @@ async def main() -> None:
         if not addressed:
             return
         logger.info('EDITED_MESSAGE_REPROCESS chat_id=%s message_id=%s sender_id=%s', event.chat_id, event.id, event.sender_id)
-        await on_message(event)
+        await on_message(event, reprocess=True)
 
     @client.on(events.ChatAction)
     async def on_chat_action(event):
@@ -491,6 +524,8 @@ async def main() -> None:
         if not _allowed_chat(event, config):
             return
         chat_id = int(event.chat_id or 0)
+        if not _serving_chat(chat_id):
+            return
         trace_id = str(uuid.uuid4())[:8]
         try:
             users = await event.get_users()
@@ -558,6 +593,8 @@ async def main() -> None:
                 title = getattr(entity, 'title', '') or ''
                 if username not in [x.lower() for x in config.listener.allowed_group_usernames] and title not in config.listener.allowed_group_titles:
                     return
+            if not _serving_chat(chat_id):
+                return
             summary = await reactions.read_reactions(
                 trace_id=str(uuid.uuid4())[:8], message_id=int(update.msg_id), reactions=update.reactions,
             )
@@ -576,6 +613,8 @@ async def main() -> None:
                 if random.random() > config.persona.idle_starter_probability:
                     continue
                 for chat_id in groups:
+                    if not _serving_chat(int(chat_id)):
+                        continue
                     last_key = f'last_starter_at:{int(chat_id)}'
                     last = float(await store.get_setting(last_key, '0') or 0)
                     if time.time() - last < config.persona.min_starter_gap_seconds:
@@ -593,8 +632,11 @@ async def main() -> None:
     async def inactive_ping_loop() -> None:
         while True:
             await asyncio.sleep(6 * 3600)
-            for chat_id in (list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()):
-                try:
+            try:
+                groups = list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()
+                for chat_id in groups:
+                    if not _serving_chat(int(chat_id)):
+                        continue
                     # "گاهی" means a bounded occasional check, not a scheduled nag.
                     if random.random() > 0.5:
                         logger.info('INACTIVE_PING_SKIPPED chat_id=%s reason=random_backoff', chat_id)
@@ -610,14 +652,17 @@ async def main() -> None:
                     await client.send_message(chat_id, ping.text[:config.policy.max_reply_chars])
                     await social.record_inactive_ping(ping.user_id, chat_id)
                     logger.info('INACTIVE_PING_SENT chat_id=%s user_id=%s', chat_id, ping.user_id)
-                except Exception as exc:
-                    logger.warning('INACTIVE_PING_SKIPPED chat_id=%s reason=send_failed exception_type=%s', chat_id, type(exc).__name__)
+            except Exception as exc:
+                logger.warning('INACTIVE_PING_TICK_FAILED exception_type=%s', type(exc).__name__)
 
     async def template_job_loop() -> None:
         while True:
             try:
                 async def deliver(job, text):
+                    if not _serving_chat(int(job['chat_id'])):
+                        return False
                     await client.send_message(job['chat_id'], text[:config.policy.max_reply_chars])
+                    return True
                 for run in await jobs.run_due(deliver=deliver):
                     logger.info('TEMPLATE_JOB_DELIVERED run_id=%s chat_id=%s', run['run_id'], run['chat_id'])
             except Exception as exc:
@@ -659,22 +704,27 @@ async def main() -> None:
     async def social_reflection_loop() -> None:
         while True:
             await asyncio.sleep(24 * 3600)
-            for chat_id in (list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()):
-                try:
+            try:
+                groups = list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()
+                for chat_id in groups:
+                    if not _serving_chat(int(chat_id)):
+                        continue
                     await awareness.reflection(chat_id)
-                except Exception as exc:
-                    logger.warning('SOCIAL_SELF_REFLECTION_FAILED chat_id=%s exception_type=%s', chat_id, type(exc).__name__)
+            except Exception as exc:
+                logger.warning('SOCIAL_REFLECTION_TICK_FAILED exception_type=%s', type(exc).__name__)
 
     async def monthly_group_memory_loop() -> None:
         # ponytail: one snapshot per group; use an event-driven compactor if group count grows.
         while True:
-            chat_ids = list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()
-            for chat_id in chat_ids:
-                try:
+            try:
+                chat_ids = list(config.listener.allowed_group_ids) or await store.get_active_group_chat_ids()
+                for chat_id in chat_ids:
+                    if not _serving_chat(int(chat_id)):
+                        continue
                     result = await brain.build_monthly_group_memory(chat_id)
                     logger.info('MONTHLY_GROUP_MEMORY_UPDATED chat_id=%s source_count=%s memory_id=%s', chat_id, result.get('source_count', 0), result.get('memory_id'))
-                except Exception as exc:
-                    logger.warning('MONTHLY_GROUP_MEMORY_FAILED chat_id=%s exception_type=%s', chat_id, type(exc).__name__)
+            except Exception as exc:
+                logger.warning('MONTHLY_GROUP_MEMORY_TICK_FAILED exception_type=%s', type(exc).__name__)
             await asyncio.sleep(24 * 3600)
 
     async def daily_report_loop() -> None:
@@ -696,7 +746,7 @@ async def main() -> None:
                     f"Retry/Error: {stats.get('retries', 0)}/{stats.get('errors', 0)}\n"
                     f"Input/Output chars: {stats.get('input_chars', 0)}/{stats.get('output_chars', 0)}"
                 )
-                send_bot_message(bot_token, config.owner_user_id, report)
+                await asyncio.to_thread(send_bot_message, bot_token, config.owner_user_id, report)
                 last_sent = marker
                 logger.info('DAILY_REPORT_SENT')
             except Exception as e:

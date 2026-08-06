@@ -67,3 +67,31 @@ async def test_failed_favorite_does_not_mark_local_saved():
     sticker=SimpleNamespace(saved_to_account=False,nsfw_score=0.0,spam_score=0.0,quality_score=0.8,usage_count=3,doc_id=7)
     assert await observer.maybe_auto_save(sticker) is False
     observer.store.mark_sticker_saved.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_sticker_uses_context_and_does_not_need_llm_marker(monkeypatch):
+    brain = object.__new__(ZeroBrain)
+    brain.config = SimpleNamespace(stickers=SimpleNamespace(enabled=True, auto_enabled=True, send_chance=1.0))
+    sent = []
+
+    async def fake_send(chat_id, mood, direct_request=False):
+        sent.append((chat_id, mood, direct_request))
+
+    brain._send_sticker_async = fake_send
+    monkeypatch.setattr('zero.brain.random.random', lambda: 0.0)
+    assert await brain._maybe_reply_with_sticker('خوبه 😄', -1001, 'چه شوخی باحالی بود 😂') == 'خوبه 😄'
+    await asyncio.sleep(0)
+    assert sent == [(-1001, 'funny', False)]
+
+
+@pytest.mark.asyncio
+async def test_auto_sticker_skips_technical_context(monkeypatch):
+    brain = object.__new__(ZeroBrain)
+    brain.config = SimpleNamespace(stickers=SimpleNamespace(enabled=True, auto_enabled=True, send_chance=1.0))
+    brain._send_sticker_async = AsyncMock()
+    monkeypatch.setattr('zero.brain.random.random', lambda: 0.0)
+    result = await brain._maybe_reply_with_sticker('پاسخ فنی', -1001, 'این خطای API چرا میاد؟ 😂')
+    await asyncio.sleep(0)
+    assert result == 'پاسخ فنی'
+    brain._send_sticker_async.assert_not_awaited()

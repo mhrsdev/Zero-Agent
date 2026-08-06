@@ -152,10 +152,20 @@ class TenancyRegistry:
         """Record a newly seen group as PENDING. Never auto-approves."""
         self.create_installation(installation_id)
         with self._conn() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO groups(installation_id,group_id,platform,platform_chat_id,title,state,discovered_at) VALUES(?,?,?,?,?,?,?)",
-                (installation_id, group_id, platform, platform_chat_id, title, GroupState.PENDING.value, time.time()),
-            )
+            existing = db.execute(
+                "SELECT group_id FROM groups WHERE installation_id=? AND platform=? AND platform_chat_id IS ? LIMIT 1",
+                (installation_id, platform, platform_chat_id),
+            ).fetchone() if platform_chat_id is not None else None
+            if existing and existing["group_id"] != group_id:
+                db.execute(
+                    "UPDATE groups SET group_id=?, title=? WHERE installation_id=? AND platform=? AND platform_chat_id IS ?",
+                    (group_id, title, installation_id, platform, platform_chat_id),
+                )
+            else:
+                db.execute(
+                    "INSERT OR IGNORE INTO groups(installation_id,group_id,platform,platform_chat_id,title,state,discovered_at) VALUES(?,?,?,?,?,?,?)",
+                    (installation_id, group_id, platform, platform_chat_id, title, GroupState.PENDING.value, time.time()),
+                )
         return self.get_group(installation_id, group_id)
 
     def get_group(self, installation_id: str, group_id: str) -> Group:
@@ -210,7 +220,15 @@ class TenancyRegistry:
 
     # ---- membership and permissions ------------------------------------
 
-    def add_member(self, scope: Scope, user_id: int, role: Role) -> None:
+    def add_member(self, scope: Scope, user_id: int, role: Role, *, actor_id: int | None = None, bootstrap: bool = False) -> None:
+        self.get_group(scope.installation_id, scope.group_id)
+        if bootstrap:
+            if actor_id is None or int(actor_id) != int(user_id) or self.members(scope):
+                raise PermissionDenied("invalid tenancy bootstrap")
+        else:
+            if actor_id is None:
+                raise PermissionDenied("actor_id is required")
+            self.require(scope.for_user(int(actor_id)), Permission.MANAGE_MEMBERS)
         with self._conn() as db:
             db.execute(
                 "INSERT INTO memberships(installation_id,group_id,user_id,role,added_at) VALUES(?,?,?,?,?) "
@@ -218,7 +236,11 @@ class TenancyRegistry:
                 (scope.installation_id, scope.group_id, int(user_id), Role(role).value, time.time()),
             )
 
-    def remove_member(self, scope: Scope, user_id: int) -> None:
+    def remove_member(self, scope: Scope, user_id: int, *, actor_id: int | None = None) -> None:
+        self.get_group(scope.installation_id, scope.group_id)
+        if actor_id is None:
+            raise PermissionDenied("actor_id is required")
+        self.require(scope.for_user(int(actor_id)), Permission.MANAGE_MEMBERS)
         with self._conn() as db:
             db.execute(
                 "DELETE FROM memberships WHERE installation_id=? AND group_id=? AND user_id=?",
@@ -287,7 +309,13 @@ class TenancyRegistry:
 
     # ---- quotas and usage ----------------------------------------------
 
-    def set_quota(self, scope: Scope, resource: str, limit: int, *, period: str = "day") -> None:
+    def set_quota(self, scope: Scope, resource: str, limit: int, *, period: str = "day", actor_id: int | None = None) -> None:
+        self.get_group(scope.installation_id, scope.group_id)
+        if actor_id is None:
+            raise PermissionDenied("actor_id is required")
+        self.require(scope.for_user(int(actor_id)), Permission.MANAGE_SETTINGS)
+        if int(limit) < 0:
+            raise ValueError("quota limit must be non-negative")
         with self._conn() as db:
             db.execute(
                 "INSERT INTO group_quotas(installation_id,group_id,resource,period,limit_value) VALUES(?,?,?,?,?) "
@@ -318,6 +346,8 @@ class TenancyRegistry:
         Usage is stored per ``(installation, group, resource, period, bucket)``,
         so one group exhausting a resource cannot affect another.
         """
+        if int(amount) <= 0:
+            raise ValueError("quota amount must be positive")
         limit = self.get_quota(scope, resource, period=period)
         bucket = self._bucket(period, now)
         with self._conn() as db:

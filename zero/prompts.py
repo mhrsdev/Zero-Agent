@@ -11,12 +11,14 @@ def _compact_json(items, limit: int):
     return json.dumps(items[-limit:], ensure_ascii=False, separators=(',', ': '))
 
 
-def build_reply_prompt(config: ZeroConfig, *, mode: str, sender_label: str, user_text: str, reply_text: str, recent: list[dict], group_summary: str, web_context: str = '', telegram_context: str = '', memory_context: str = '', chat_id: int | None = None, sender_id: int | None = None, message_id: int | None = None, thread_id: int | None = None, reply_to_message_id: int | None = None, sender_is_bot: bool = False, reply_sender_id: int | None = None, reply_sender_label: str = '', reply_sender_is_bot: bool = False, deep_research: bool = False) -> str:
+def build_reply_prompt(config: ZeroConfig, *, mode: str, sender_label: str, user_text: str, reply_text: str, recent: list[dict], group_summary: str, web_context: str = '', telegram_context: str = '', memory_context: str = '', chat_id: int | None = None, sender_id: int | None = None, message_id: int | None = None, thread_id: int | None = None, reply_to_message_id: int | None = None, sender_is_bot: bool = False, reply_sender_id: int | None = None, reply_sender_label: str = '', reply_sender_is_bot: bool = False, deep_research: bool = False, group_instruction: str = '') -> str:
     deep_rule = ('حالت سرچ عمیق فعال است: یک گزارش جامع و ساختاریافته بده؛ یافته‌های منابع مستقل را مقایسه کن، توافق‌ها و اختلاف‌ها و ابهام‌ها را جدا بنویس، برای ادعاهای اصلی منبع موجود را ذکر کن و چیزی فراتر از شواهد نساز. هدف پوشش ۱۵ سایت مرتبط و سقف ۳۰ سایت است؛ اگر کمتر از ۱۰ منبع مرتبط پیدا شد، پوشش محدود را صریح اعلام کن و هرگز با سایت نامرتبط تعداد را پر نکن.' if deep_research else '')
     safe_memory_context = '' if deep_research else memory_context
+    local_group_instruction = f"\nقواعد اختصاصی این گروه:\n{group_instruction}\n" if group_instruction else ''
     web_evidence = f'<UNTRUSTED_WEB_EVIDENCE>\n{web_context}\n</UNTRUSTED_WEB_EVIDENCE>' if web_context else 'ندارد'
     return f"""
 {build_persona_block(config, mode)}
+{local_group_instruction}
 
 اگر سؤال هویتی دربارهٔ خودِ کاربر بود (مثل «من کی هستم؟»، «منو می‌شناسی؟»، «اسم من چیه؟» یا «چی ازم یادت هست؟»): فقط از facts صریح پیام فعلی یا کانتکست حافظهٔ مرتبط استفاده کن. نقش، رابطه، نام، ترجیح یا سابقه نساز. اگر شواهد معتبر نداری، کوتاه و صادقانه بگو اطلاعات مطمئن یا خاطرهٔ مرتبطی در دسترس نیست. در انگلیسی هم همین قاعده برقرار است: do not invent user identity, relationship, role, name, preference, or history.
 

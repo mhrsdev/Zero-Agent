@@ -30,7 +30,7 @@ def approved(registry, installation, group, chat_id, owner=1):
     """Discover, seat an owner, and approve a group into serving state."""
     registry.discover_group(installation, group, platform_chat_id=chat_id, title=group)
     scope = Scope(installation, group, owner)
-    registry.add_member(scope, owner, Role.OWNER)
+    registry.add_member(scope, owner, Role.OWNER, actor_id=owner, bootstrap=True)
     registry.set_group_state(scope, GroupState.ACTIVE)
     return scope
 
@@ -85,7 +85,7 @@ def test_approval_requires_manage_group_state_permission(registry):
     with pytest.raises(PermissionDenied):
         registry.set_group_state(stranger, GroupState.ACTIVE)
     # A plain member still cannot approve.
-    registry.add_member(stranger, 999, Role.MEMBER)
+    registry.add_member(stranger, 999, Role.MEMBER, actor_id=999, bootstrap=True)
     with pytest.raises(PermissionDenied):
         registry.set_group_state(stranger, GroupState.ACTIVE)
     assert registry.get_group("inst", "g1").state is GroupState.PENDING
@@ -116,8 +116,8 @@ def test_disabled_group_stops_serving_but_can_be_reactivated(registry):
 def test_same_user_holds_independent_roles_in_two_groups(registry):
     a = approved(registry, "inst", "group-a", -100, owner=1)
     b = approved(registry, "inst", "group-b", -200, owner=2)
-    registry.add_member(a, 7, Role.ADMIN)
-    registry.add_member(b, 7, Role.VIEWER)
+    registry.add_member(a, 7, Role.ADMIN, actor_id=a.user_id)
+    registry.add_member(b, 7, Role.VIEWER, actor_id=b.user_id)
 
     assert registry.role_of(a, 7) is Role.ADMIN
     assert registry.role_of(b, 7) is Role.VIEWER
@@ -130,7 +130,7 @@ def test_same_user_holds_independent_roles_in_two_groups(registry):
 def test_membership_in_one_group_grants_nothing_in_another(registry):
     a = approved(registry, "inst", "group-a", -100)
     b = approved(registry, "inst", "group-b", -200, owner=2)
-    registry.add_member(a, 7, Role.OWNER)
+    registry.add_member(a, 7, Role.OWNER, actor_id=a.user_id)
 
     assert registry.permissions(b, 7) == frozenset()
     with pytest.raises(PermissionDenied):
@@ -150,9 +150,9 @@ def test_two_groups_have_different_administrators(registry):
 def test_removing_a_member_revokes_only_that_groups_rights(registry):
     a = approved(registry, "inst", "group-a", -100)
     b = approved(registry, "inst", "group-b", -200, owner=2)
-    registry.add_member(a, 7, Role.MEMBER)
-    registry.add_member(b, 7, Role.MEMBER)
-    registry.remove_member(a, 7)
+    registry.add_member(a, 7, Role.MEMBER, actor_id=a.user_id)
+    registry.add_member(b, 7, Role.MEMBER, actor_id=b.user_id)
+    registry.remove_member(a, 7, actor_id=a.user_id)
     assert registry.role_of(a, 7) is None
     assert registry.role_of(b, 7) is Role.MEMBER
 
@@ -193,7 +193,7 @@ def test_unknown_setting_keys_are_rejected(registry):
 
 def test_member_cannot_change_group_settings(registry):
     a = approved(registry, "inst", "group-a", -100)
-    registry.add_member(a, 7, Role.MEMBER)
+    registry.add_member(a, 7, Role.MEMBER, actor_id=a.user_id)
     with pytest.raises(PermissionDenied):
         registry.set_setting(a, "persona", "hijacked", actor_id=7)
 
@@ -204,8 +204,8 @@ def test_member_cannot_change_group_settings(registry):
 def test_quotas_are_independent_and_one_group_cannot_exhaust_another(registry):
     a = approved(registry, "inst", "group-a", -100)
     b = approved(registry, "inst", "group-b", -200, owner=2)
-    registry.set_quota(a, "llm_calls", 2)
-    registry.set_quota(b, "llm_calls", 5)
+    registry.set_quota(a, "llm_calls", 2, actor_id=a.user_id)
+    registry.set_quota(b, "llm_calls", 5, actor_id=b.user_id)
 
     assert registry.consume(a, "llm_calls")[0] is True
     assert registry.consume(a, "llm_calls")[0] is True
@@ -307,7 +307,7 @@ def test_bound_memory_service_rejects_another_groups_chat(registry, tmp_path):
 
     a = approved(registry, "inst", "group-a", -100)
     approved(registry, "inst", "group-b", -200, owner=2)
-    registry.add_member(a, 7, Role.MEMBER)
+    registry.add_member(a, 7, Role.MEMBER, actor_id=a.user_id)
 
     service = MemoryService(MemoryV3Service(str(tmp_path / "v3.db"))).bind(a.for_user(7), registry)
     own = SimpleNamespace(chat_id=-100, sender_id=7, trace_id="t", message_id=1)
@@ -330,7 +330,7 @@ def test_bound_memory_service_enforces_memory_permissions(registry, tmp_path):
     from zero.memory_v3 import MemoryV3Service
 
     a = approved(registry, "inst", "group-a", -100)
-    registry.add_member(a, 7, Role.VIEWER)  # viewers may not touch memory
+    registry.add_member(a, 7, Role.VIEWER, actor_id=a.user_id)  # viewers may not touch memory
     service = MemoryService(MemoryV3Service(str(tmp_path / "v3.db"))).bind(a.for_user(7), registry)
     message = SimpleNamespace(chat_id=-100, sender_id=7, trace_id="t", message_id=1)
 
@@ -339,7 +339,7 @@ def test_bound_memory_service_enforces_memory_permissions(registry, tmp_path):
     with pytest.raises(PermissionDenied):
         asyncio.run(service.observe(message))
 
-    registry.add_member(a, 7, Role.MEMBER)
+    registry.add_member(a, 7, Role.MEMBER, actor_id=a.user_id)
     asyncio.run(service.context(message))
 
 
@@ -351,7 +351,7 @@ def test_bound_memory_service_rejects_a_foreign_scoped_item(registry, tmp_path):
 
     a = approved(registry, "inst", "group-a", -100)
     approved(registry, "inst", "group-b", -200, owner=2)
-    registry.add_member(a, 7, Role.MEMBER)
+    registry.add_member(a, 7, Role.MEMBER, actor_id=a.user_id)
     service = MemoryService(MemoryV3Service(str(tmp_path / "v3.db"))).bind(a.for_user(7), registry)
 
     asyncio.run(service.put(MemoryV3Item.group(chat_id=-100, content="ours", kind="fact")))

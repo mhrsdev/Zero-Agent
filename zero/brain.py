@@ -21,7 +21,7 @@ from .document_bundles import DocumentBundles
 from .memory_v3 import MemoryV3Item, MemoryV3Service
 from .core.memory_service import MemoryService
 from .memory_v3.retrieval_planner import metadata as planner_metadata, parse as parse_retrieval_plan, prompt as planner_prompt, window as planner_window
-from .market_prices import BinancePriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError, TGJUWebPriceClient
+from .market_prices import BinancePriceClient, MilliGoldPriceClient, NavasanPriceClient, NobitexPriceClient, PriceAPIError, TGJUWebPriceClient
 from .semantic_memory import SemanticUserMemory
 from .experience_memory import ExperienceMemory
 from .procedural_memory import ProceduralMemory
@@ -54,6 +54,21 @@ from .vision import VisionProcessor, is_image_media, is_gif_media, is_video_medi
 from .stickers.observer import StickerObserver
 
 logger = logging.getLogger('zero.brain')
+
+PROJECT_GROUP_CHAT_ID = -1002042626209
+PROJECT_GROUP_INSTRUCTION = (
+    'اگر کسی دربارهٔ پروژهٔ Zero سؤال کرد، بگو پروژه اوپن‌سورس است و لینک رسمی GitHub را بده: '
+    'https://github.com/mhrsdev/Zero-Agent . در پایان، فقط یک‌بار و بدون اسپم، از او بخواه اگر پروژه را مفید دید Star بدهد.'
+)
+PROJECT_REPO_REPLY = 'آره، پروژهٔ Zero اوپن‌سورسه:\nhttps://github.com/mhrsdev/Zero-Agent\nاگه به‌دردت خورد یه ⭐ هم بزن 😄'
+
+
+def is_project_repo_request(text: str) -> bool:
+    normalized = (text or '').casefold().replace('ي', 'ی').replace('ك', 'ک').replace('‌', '')
+    project = any(word in normalized for word in ('پروژه', 'project'))
+    zero = any(word in normalized for word in ('زیرو', 'zero'))
+    repo = any(word in normalized for word in ('گیتهاب', 'گیت هاب', 'github', 'گیتهابت'))
+    return (project and zero) or (repo and zero)
 
 # Robust regex: catches STICKER:funny, [STICKER:funny], STICKER: funny.
 # Note: NO \s* before STICKER — that would eat the preceding space.
@@ -213,7 +228,7 @@ def sticker_context_allowed(user_text: str, *, direct_request: bool = False) -> 
     forbidden = ('فنی', 'کد', 'python', 'api', 'ارور', 'خطا', 'خبر', 'قیمت', 'سرچ', 'جستجو', 'دیباگ', 'سیاست', 'مرگ', 'دعوا')
     if any(item in low for item in forbidden):
         return False
-    allowed = ('😂', '🤣', 'خخ', 'شوخی', 'جوک', 'باحال', 'تبریک', 'مبارک', 'سلام', 'خداحافظ', 'lol', 'haha', 'دمت گرم')
+    allowed = ('😂', '🤣', '😭', '😅', '😎', '😍', '🤯', '👏', '🔥', 'خخ', 'شوخی', 'جوک', 'باحال', 'تبریک', 'مبارک', 'سلام', 'خداحافظ', 'واو', 'وای', 'دمت گرم', 'lol', 'haha')
     return any(item in low for item in allowed)
 
 
@@ -255,6 +270,7 @@ class ZeroBrain:
         self.router = router
         self.knowledge = knowledge
         self.market_prices = BinancePriceClient()
+        self.milli_prices = MilliGoldPriceClient()
         self.navasan_prices = NavasanPriceClient()
         self.tgju_prices = TGJUWebPriceClient()
         self.nobitex_prices = NobitexPriceClient()
@@ -386,8 +402,20 @@ class ZeroBrain:
         if direct_request and mood is None:
             mood = detect_mood_from_user(user_text)
             logger.info('STICKER_DIRECT_REQUEST_DETECTED chat_id=%s mood=%s marker_present=false retry=%s', chat_id, mood, retry_request)
+        auto_mood = None
+        sticker_cfg = self.config.stickers
+        if (
+            mood is None
+            and not direct_request
+            and getattr(sticker_cfg, 'auto_enabled', False)
+            and sticker_context_allowed(user_text)
+            and random.random() < max(0.0, min(1.0, float(getattr(sticker_cfg, 'send_chance', 0.0))))
+        ):
+            auto_mood = detect_mood_from_user(user_text)
+            mood = auto_mood
+            logger.info('STICKER_AUTO_INTENT_DETECTED chat_id=%s mood=%s', chat_id, mood)
         if mood and self.config.stickers.enabled:
-            if not direct_request and (not sticker_context_allowed(user_text) or cleaned.strip()):
+            if not direct_request and auto_mood is None and (not sticker_context_allowed(user_text) or cleaned.strip()):
                 logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=context_or_text_response', chat_id)
                 return cleaned
             asyncio.create_task(self._send_sticker_async(chat_id, mood, direct_request=direct_request))
@@ -419,10 +447,15 @@ class ZeroBrain:
         muted = await self._muted_map()
         return int(muted.get(str(sender_id), 0) or 0) > int(time.time())
 
-    async def _should_interject(self, message: IncomingMessage) -> bool:
+    async def _should_interject(self, message: IncomingMessage, social_decision=None) -> bool:
         direct_other = bool(re.search(r'(^|\s)@[A-Za-z0-9_]{3,}', message.text or '')) and not message.mention_zero
-        if not self.config.persona.allow_random_interject or message.sender_is_bot or direct_other or (message.reply_text and not message.reply_to_zero):
+        if not self.config.persona.allow_random_interject or message.sender_is_bot or bool(message.media_type) or direct_other or (message.reply_text and not message.reply_to_zero):
             return False
+        if social_decision is not None:
+            # Random interjection is a fallback for ordinary conversation, not a
+            # way around social silence. Curious project prompts are explicit here.
+            if social_decision.reason not in {'not_addressed', 'bounded_curiosity'} or social_decision.emotion not in {'neutral', 'question'}:
+                return False
         last = float(await self.store.get_setting(f'last_interject_at:{int(message.chat_id)}', '0') or 0)
         if time.time() - last < self.config.persona.min_interject_gap_seconds:
             return False
@@ -458,6 +491,9 @@ class ZeroBrain:
         recent_user_count = await self.store.count_rate_events(message.sender_id, 'reply', self.config.policy.user_window_seconds, message.chat_id)
         daily_user_count = await self.store.count_rate_events(message.sender_id, 'reply', 24 * 3600, message.chat_id)
         triggered = is_triggered(message, self.config, self.config.listener.account_username)
+        project_repo_request = message.chat_id == PROJECT_GROUP_CHAT_ID and is_project_repo_request(message.text)
+        if project_repo_request:
+            triggered = True
         media_followup = await self._media_followup_info(message)
         direct_sticker_request = user_requests_sticker(message.text)
         retry_sticker_request = sticker_retry_feedback(message.text) and bool(message.reply_to_zero or media_followup)
@@ -477,7 +513,8 @@ class ZeroBrain:
             else:
                 logger.info('MEDIA_FOLLOWUP_SPAM_BYPASS_DENIED trace_id=%s chat_id=%s sender_id=%s current_message_id=%s media_message_id=%s media_type=%s age_seconds=%s reason=no_recent_same_sender_media', message.trace_id or '-', message.chat_id, message.sender_id, message.message_id, '-', '-', -1)
         # Only exact search commands can turn Web Search into a trigger.
-        should_interject = (not triggered) and await self._should_interject(message)
+        social_decision = await self.social_awareness.decide(message)
+        should_interject = (not triggered) and await self._should_interject(message, social_decision)
         # The challenge exists only at the configured, real rate-limit boundary.
         # Owner and bot safeguards retain their existing bypass/separate policies.
         window_limit_reached = self.config.policy.user_max_replies_per_window > 0 and recent_user_count >= self.config.policy.user_max_replies_per_window
@@ -501,7 +538,6 @@ class ZeroBrain:
                 return Decision(True, 'limit_challenge'), game.text
             else:
                 return Decision(True, 'user_rate_limit'), 'یه کم صبر کن؛ لیمیت پیام‌هات پر شده.'
-        social_decision = await self.social_awareness.decide(message)
         if social_decision.should_ignore and not triggered and not should_interject and social_decision.emotion not in {'sad', 'conflict'}:
             return Decision(False, f'social_{social_decision.reason}'), ''
         if social_decision.should_ask:
@@ -524,6 +560,8 @@ class ZeroBrain:
             await self.store.add_rate_event(message.sender_id, 'abuse', message.chat_id)
         if spam_blocked:
             return Decision(True, 'spam_soft_block'), 'کمتر اسپم کن که جواب بهتر بگیری 🙂'
+        if project_repo_request:
+            return Decision(True, 'project_repo'), PROJECT_REPO_REPLY
         nova_ok, reason = await self._check_nova_conversation_limit(message)
         if not nova_ok:
             if reason == 'nova_window_limit':
@@ -537,7 +575,7 @@ class ZeroBrain:
                 count = await self.store.count_rate_events(message.sender_id, 'bot_msg', self.config.policy.bot_msg_window_seconds, message.chat_id)
                 if count >= self.config.policy.bot_msg_limit:
                     return Decision(True, 'bot_msg_limit'), f'یه کم صبر کن، الان {self.config.policy.bot_msg_limit} تا پیام داده بودم، بعداً ادامه میدم 😉'
-        return None, ''
+        return decision if decision.interject else None, ''
 
     # ------------------------------------------------------------------
     # MAIN REPLY PATH (shared entry for all output paths)
@@ -549,8 +587,8 @@ class ZeroBrain:
         tools = [
             {'name': 'read_knowledge', 'description': 'Read relevant source-backed public facts and news from Zero Knowledge Memory. Use only when needed; do not use for greetings or casual conversation.', 'parameters': {'type': 'object', 'properties': {'query': {'type': 'string', 'description': 'The focused subject to look up.'}, 'max_results': {'type': 'integer', 'minimum': 1, 'maximum': 5}}, 'required': ['query']}},
             {'name': 'read_market_price', 'description': 'Read a current public Binance Spot crypto price. Use for cryptocurrency price/rate requests. Never invent a number; the result includes source, unit, market type, and timestamp.', 'parameters': {'type': 'object', 'properties': {'symbol': {'type': 'string', 'description': 'Base crypto asset, e.g. BTC, ETH, BNB, SOL.'}, 'quote': {'type': 'string', 'description': 'Quote asset, normally USDT.'}}, 'required': ['symbol']}},
-            {'name': 'read_iran_market_price', 'description': 'Read current Iran dollar, gold, and coin rates from Navasan. Symbols: usd, 18ayar, sekkeh. Never invent a number; result includes unit, source, change, and timestamp.', 'parameters': {'type': 'object', 'properties': {'asset': {'type': 'string', 'enum': ['usd', '18ayar', 'sekkeh']}}, 'required': ['asset']}},
-            {'name': 'read_usdt_toman_price', 'description': 'Read the current USDT/Toman order book from Nobitex. Returns best ask (buy), best bid (sell), average, unit Toman, source, market type, and timestamp. Never invent a number.', 'parameters': {'type': 'object', 'properties': {}}},
+            {'name': 'read_iran_market_price', 'description': 'Read current Iran dollar, gold, and coin rates. Gold 18ayar comes from Milli Gold and its value is Toman per 1 milligram; usd and sekkeh come from Navasan. Never invent a number; result includes unit, weight, source, change, and timestamp.', 'parameters': {'type': 'object', 'properties': {'asset': {'type': 'string', 'enum': ['usd', '18ayar', 'sekkeh']}}, 'required': ['asset']}},
+            {'name': 'read_usdt_toman_price', 'description': 'Read the current USDT/Toman order book from Nobitex v3. Returns best bid (buy), best ask (sell), average, last trade, unit Toman, source, market type, and timestamp. Never invent a number.', 'parameters': {'type': 'object', 'properties': {}}},
         ]
         result = await complete_with_tools(prompt, tools, max_output_tokens=reply_token_limit(message.text or ''))
         calls = result.metadata.get('tool_calls', []) if result.metadata else []
@@ -585,7 +623,7 @@ class ZeroBrain:
             elif name == 'read_iran_market_price':
                 asset = str(args.get('asset') or '')[:40].lower()
                 try:
-                    value = await self.navasan_prices.get_price(asset)
+                    value = await (self.milli_prices if asset == '18ayar' else self.navasan_prices).get_price(asset)
                     encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
                 except PriceAPIError as exc:
                     if asset in {'18ayar', 'sekkeh'}:
@@ -594,7 +632,7 @@ class ZeroBrain:
                             encoded = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
                             logger.info('MARKET_WEB_FALLBACK_USED trace_id=%s asset=%s source=TGJU', message.trace_id or '-', asset)
                         except PriceAPIError as web_exc:
-                            encoded = json.dumps({'error': str(exc), 'web_fallback_error': str(web_exc), 'source': 'Navasan API + TGJU'}, ensure_ascii=False)
+                            encoded = json.dumps({'error': str(exc), 'web_fallback_error': str(web_exc), 'source': 'Milli Gold/Navasan + TGJU'}, ensure_ascii=False)
                     else:
                         encoded = json.dumps({'error': str(exc), 'source': 'Navasan API'}, ensure_ascii=False)
                 blocks.append(f'[TOOL_RESULT read_iran_market_price]\n{encoded}\n[/TOOL_RESULT]')
@@ -655,7 +693,7 @@ class ZeroBrain:
             if not actors: return 'No historical evidence was retrieved because the requested actor was not resolved; ask a short clarification instead of guessing.', {**base,'success':False,'fallback':'unresolved_actor'}
             bounds=planner_window(plan.time_kind)
             if not bounds: return 'No historical evidence was retrieved because the requested time range was not precise enough.', {**base,'success':False,'fallback':'no_time_window'}
-            rows=await self.store.get_recent_since(message.chat_id,since_ts=int(bounds[0]),limit=80)
+            rows=await self.store.get_recent_since(message.chat_id,since_ts=int(bounds[0]),limit=80,platform=message.platform,account_scope=message.account_scope)
             rows=[r for r in rows if r.get('role')=='user' and int(r.get('sender_id') or 0) in actors]
             lines=[]
             for r in rows[:8]:
@@ -666,7 +704,7 @@ class ZeroBrain:
         return '', {**base,'candidate_count':0,'selected_count':0}
 
     async def _handle_no_media(self, message: IncomingMessage, decision: Decision, intent: Intent) -> tuple[Decision, str]:
-        recent = await self.store.get_recent(message.chat_id, limit=100)
+        recent = await self.store.get_recent(message.chat_id, limit=100, platform=message.platform, account_scope=message.account_scope)
         if self.v1_memory_runtime_enabled:
             logger.info('MEMORY_RETRIEVAL_STARTED trace_id=%s chat_id=%s query_terms=%s', message.trace_id or '-', message.chat_id, len(re.findall(r'[\wآ-ی‌]{3,}', (message.text or '').lower())))
             layered = await self.store.retrieve_layered_memory(message.chat_id, message.text, sender_id=message.sender_id, short_limit=1, medium_limit=4, long_limit=6)
@@ -908,6 +946,7 @@ class ZeroBrain:
             chat_id=message.chat_id, sender_id=message.sender_id, message_id=message.message_id, sender_is_bot=message.sender_is_bot, thread_id=message.thread_id, reply_to_message_id=message.reply_to_message_id,
             reply_sender_id=message.reply_sender_id, reply_sender_label=message.reply_sender_label, reply_sender_is_bot=message.reply_sender_is_bot,
             deep_research=deep_search,
+            group_instruction=PROJECT_GROUP_INSTRUCTION if message.chat_id == PROJECT_GROUP_CHAT_ID else '',
         )
         tool_evidence: dict = {}
         reply_text = await self._generate_with_knowledge_tool(message, prompt, chat_id=message.chat_id, evidence=tool_evidence)
@@ -975,7 +1014,7 @@ class ZeroBrain:
 
     async def maybe_reply(self, message: IncomingMessage) -> tuple[Decision, str]:
         early_decision, early_text = await self._pre_check(message)
-        if early_decision is not None:
+        if early_decision is not None and not early_decision.interject:
             return early_decision, early_text
         search_command = parse_search_command(message.text)
         if search_command and not search_command[1]:
@@ -1012,7 +1051,7 @@ class ZeroBrain:
         clean_user_text = strip_trigger(message.text, self.config.listener.account_username)
         vision_result = await self.vision.process(media_event, question=clean_user_text)
         if vision_result:
-            recent = await self.store.get_recent(message.chat_id, limit=100)
+            recent = await self.store.get_recent(message.chat_id, limit=100, platform=message.platform, account_scope=message.account_scope)
             has_link_context = bool(
                 re.search(r'https?://\S+', clean_user_text or '')
                 or re.search(r'https?://\S+', message.reply_text or '')
@@ -1030,7 +1069,8 @@ class ZeroBrain:
                 user_text=clean_user_text + f"\n\n[Vision Analysis: {vision_result}]",
                 reply_text=message.reply_text, recent=[], group_summary='', web_context='', memory_context=memory_context,
                 chat_id=message.chat_id, sender_id=message.sender_id, message_id=message.message_id, thread_id=message.thread_id, reply_to_message_id=message.reply_to_message_id,
-                reply_sender_id=message.reply_sender_id, reply_sender_label=message.reply_sender_label, reply_sender_is_bot=message.reply_sender_is_bot)
+                reply_sender_id=message.reply_sender_id, reply_sender_label=message.reply_sender_label, reply_sender_is_bot=message.reply_sender_is_bot,
+                group_instruction=PROJECT_GROUP_INSTRUCTION if message.chat_id == PROJECT_GROUP_CHAT_ID else '')
             # VISION PATH — must also sanitize!
             reply_text = await self._generate_and_sanitize(message, prompt, chat_id=message.chat_id)
             return Decision(True, 'vision'), reply_text

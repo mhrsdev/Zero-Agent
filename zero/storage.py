@@ -25,6 +25,8 @@ SCHEMA = '''
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS group_context_state (chat_id INTEGER PRIMARY KEY,last_message_id INTEGER,last_timestamp INTEGER,summary_json TEXT NOT NULL DEFAULT '{}',summary_version INTEGER NOT NULL DEFAULT 0,pending_from_message_id INTEGER,optimistic_version INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS group_context_consumed (chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL,edited_at INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(chat_id,message_id));
+CREATE TABLE IF NOT EXISTS group_context_state_scoped (scope_key TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,last_message_id INTEGER,last_timestamp INTEGER,summary_json TEXT NOT NULL DEFAULT '{}',summary_version INTEGER NOT NULL DEFAULT 0,optimistic_version INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS group_context_consumed_scoped (scope_key TEXT NOT NULL,message_id INTEGER NOT NULL,edited_at INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope_key,message_id));
 CREATE TABLE IF NOT EXISTS recent_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id INTEGER NOT NULL,
@@ -770,7 +772,7 @@ class ZeroStore:
     async def reserve_incoming_message(
         self, *, platform: str, account_scope: str, chat_id: int, message_id: int,
         thread_id: int | None, sender_id: int | None, trace_id: str,
-        expires_at: int | None = None,
+        expires_at: int | None = None, reprocess: bool = False,
     ) -> dict[str, Any]:
         """Atomically claim one inbound message across handlers, processes, and restarts."""
         now = int(time.time())
@@ -792,6 +794,18 @@ class ZeroStore:
                 conn.commit()
                 if row['trace_id'] == trace_id and row['status'] == 'processing':
                     return {'claimed': True, 'status': 'processing', 'trace_id': trace_id, 'attempt_count': row['attempt_count']}
+                retryable = row['status'] in {'failed', 'expired'} and int(row['attempt_count'] or 0) < 3
+                editable = reprocess and row['status'] == 'expired'
+                if retryable or editable:
+                    conn.execute(
+                        '''UPDATE incoming_message_dedup
+                           SET status='processing',trace_id=?,updated_at=?,finished_at=NULL,
+                               reason='',attempt_count=attempt_count+1
+                           WHERE platform=? AND account_scope=? AND chat_id=? AND message_id=?''',
+                        (trace_id, now, platform, account_scope, chat_id, message_id),
+                    )
+                    conn.commit()
+                    return {'claimed': True, 'status': 'processing', 'trace_id': trace_id, 'attempt_count': int(row['attempt_count'] or 0) + 1}
                 return {'claimed': False, **dict(row)}
 
     async def expire_stale_incoming_messages(self, lease_seconds: int = 300) -> int:
@@ -989,8 +1003,24 @@ class ZeroStore:
         now = int(time.time())
         async with self._lock:
             with self._conn() as conn:
-                conn.execute('INSERT OR IGNORE INTO recent_messages(chat_id,sender_id,sender_label,role,text,platform,account_scope,telegram_message_id,reply_to_message_id,thread_id,sender_username,sender_display_name,trace_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (chat_id, sender_id, sender_label, role, text, platform, account_scope, telegram_message_id, reply_to_message_id, thread_id, sender_username, sender_display_name, trace_id, now))
-                conn.execute('DELETE FROM recent_messages WHERE chat_id=? AND id NOT IN (SELECT id FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)', (chat_id, chat_id, self.recent_messages_limit))
+                values = (chat_id, sender_id, sender_label, role, text, platform, account_scope, telegram_message_id, reply_to_message_id, thread_id, sender_username, sender_display_name, trace_id, now)
+                existing = None
+                if platform and account_scope and telegram_message_id is not None:
+                    existing = conn.execute(
+                        'SELECT id FROM recent_messages WHERE platform=? AND account_scope=? AND chat_id=? AND telegram_message_id=? LIMIT 1',
+                        (platform, account_scope, chat_id, telegram_message_id),
+                    ).fetchone()
+                if existing:
+                    conn.execute(
+                        'UPDATE recent_messages SET sender_id=?,sender_label=?,role=?,text=?,reply_to_message_id=?,thread_id=?,sender_username=?,sender_display_name=?,trace_id=?,created_at=? WHERE id=?',
+                        (sender_id, sender_label, role, text, reply_to_message_id, thread_id, sender_username, sender_display_name, trace_id, now, existing['id']),
+                    )
+                else:
+                    conn.execute('INSERT INTO recent_messages(chat_id,sender_id,sender_label,role,text,platform,account_scope,telegram_message_id,reply_to_message_id,thread_id,sender_username,sender_display_name,trace_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', values)
+                if platform and account_scope:
+                    conn.execute('DELETE FROM recent_messages WHERE platform=? AND account_scope=? AND chat_id=? AND id NOT IN (SELECT id FROM recent_messages WHERE platform=? AND account_scope=? AND chat_id=? ORDER BY id DESC LIMIT ?)', (platform, account_scope, chat_id, platform, account_scope, chat_id, self.recent_messages_limit))
+                else:
+                    conn.execute('DELETE FROM recent_messages WHERE chat_id=? AND id NOT IN (SELECT id FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)', (chat_id, chat_id, self.recent_messages_limit))
                 conn.commit()
 
     async def get_reply_chain(self, platform: str, account_scope: str, chat_id: int, message_id: int, *, max_depth: int = 8) -> list[dict[str, Any]]:
@@ -1024,44 +1054,65 @@ class ZeroStore:
                 rows = conn.execute('SELECT DISTINCT chat_id FROM recent_messages WHERE chat_id < 0 ORDER BY chat_id').fetchall()
         return [int(row['chat_id']) for row in rows]
 
-    async def get_group_context_state(self, chat_id: int) -> dict[str, Any]:
+    async def get_group_context_state(self, chat_id: int, *, platform: str | None = None, account_scope: str | None = None) -> dict[str, Any]:
         async with self._lock:
             with self._conn() as conn:
-                row=conn.execute('SELECT * FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone()
+                if platform and account_scope:
+                    key=f'{platform}:{account_scope}:{chat_id}'
+                    row=conn.execute('SELECT * FROM group_context_state_scoped WHERE scope_key=?',(key,)).fetchone()
+                else:
+                    key=''
+                    row=conn.execute('SELECT * FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone()
                 return dict(row) if row else {'chat_id':chat_id,'last_message_id':None,'last_timestamp':None,'summary_json':'{}','summary_version':0,'optimistic_version':0}
 
-    async def get_unconsumed_group_messages(self, chat_id:int, limit:int=60) -> list[dict[str,Any]]:
+    async def get_unconsumed_group_messages(self, chat_id:int, limit:int=60, *, platform: str | None = None, account_scope: str | None = None) -> list[dict[str,Any]]:
         async with self._lock:
             with self._conn() as conn:
-                rows=conn.execute('SELECT m.* FROM recent_messages m LEFT JOIN group_context_consumed c ON c.chat_id=m.chat_id AND c.message_id=m.telegram_message_id WHERE m.chat_id=? AND m.telegram_message_id IS NOT NULL AND c.message_id IS NULL ORDER BY m.id ASC LIMIT ?',(chat_id,max(1,limit))).fetchall()
+                if platform and account_scope:
+                    key=f'{platform}:{account_scope}:{chat_id}'
+                    rows=conn.execute('SELECT m.* FROM recent_messages m LEFT JOIN group_context_consumed_scoped c ON c.scope_key=? AND c.message_id=m.telegram_message_id WHERE m.chat_id=? AND m.platform=? AND m.account_scope=? AND m.telegram_message_id IS NOT NULL AND c.message_id IS NULL ORDER BY m.id ASC LIMIT ?',(key,chat_id,platform,account_scope,max(1,limit))).fetchall()
+                else:
+                    rows=conn.execute('SELECT m.* FROM recent_messages m LEFT JOIN group_context_consumed c ON c.chat_id=m.chat_id AND c.message_id=m.telegram_message_id WHERE m.chat_id=? AND m.telegram_message_id IS NOT NULL AND c.message_id IS NULL ORDER BY m.id ASC LIMIT ?',(chat_id,max(1,limit))).fetchall()
                 return [dict(r) for r in rows]
 
-    async def commit_group_context(self, chat_id:int, rows:list[dict[str,Any]], summary:dict[str,Any]|None, expected_version:int) -> bool:
+    async def commit_group_context(self, chat_id:int, rows:list[dict[str,Any]], summary:dict[str,Any]|None, expected_version:int, *, platform: str | None = None, account_scope: str | None = None) -> bool:
         if not rows:return True
         now=int(time.time()); last=rows[-1]
         async with self._lock:
             with self._conn() as conn:
-                conn.execute('BEGIN IMMEDIATE'); current=conn.execute('SELECT optimistic_version FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone(); version=int(current['optimistic_version']) if current else 0
+                scoped=bool(platform and account_scope)
+                key=f'{platform}:{account_scope}:{chat_id}' if scoped else ''
+                table='group_context_state_scoped' if scoped else 'group_context_state'
+                consumed='group_context_consumed_scoped' if scoped else 'group_context_consumed'
+                conn.execute('BEGIN IMMEDIATE'); current=conn.execute(f'SELECT optimistic_version FROM {table} WHERE '+('scope_key=?' if scoped else 'chat_id=?'),(key if scoped else chat_id,)).fetchone(); version=int(current['optimistic_version']) if current else 0
                 if version!=expected_version: conn.execute('ROLLBACK'); return False
-                for row in rows: conn.execute('INSERT OR IGNORE INTO group_context_consumed(chat_id,message_id,edited_at) VALUES(?,?,0)',(chat_id,int(row['telegram_message_id'])))
-                old=conn.execute('SELECT summary_version FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone(); sv=(int(old['summary_version']) if old else 0)+(1 if summary is not None else 0)
-                payload=json.dumps(summary or (json.loads(conn.execute('SELECT summary_json FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone()['summary_json']) if old else {}),ensure_ascii=False)
-                conn.execute('INSERT INTO group_context_state(chat_id,last_message_id,last_timestamp,summary_json,summary_version,optimistic_version,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_timestamp=excluded.last_timestamp,summary_json=excluded.summary_json,summary_version=excluded.summary_version,optimistic_version=excluded.optimistic_version,updated_at=excluded.updated_at',(chat_id,int(last['telegram_message_id']),int(last['created_at']),payload,sv,version+1,now));conn.execute('COMMIT');return True
+                for row in rows:
+                    if scoped: conn.execute('INSERT OR IGNORE INTO group_context_consumed_scoped(scope_key,message_id,edited_at) VALUES(?,?,0)',(key,int(row['telegram_message_id'])))
+                    else: conn.execute('INSERT OR IGNORE INTO group_context_consumed(chat_id,message_id,edited_at) VALUES(?,?,0)',(chat_id,int(row['telegram_message_id'])))
+                old=conn.execute(f'SELECT summary_version,summary_json FROM {table} WHERE '+('scope_key=?' if scoped else 'chat_id=?'),(key if scoped else chat_id,)).fetchone(); sv=(int(old['summary_version']) if old else 0)+(1 if summary is not None else 0)
+                payload=json.dumps(summary or (json.loads(old['summary_json']) if old else {}),ensure_ascii=False)
+                if scoped:
+                    conn.execute('INSERT INTO group_context_state_scoped(scope_key,chat_id,last_message_id,last_timestamp,summary_json,summary_version,optimistic_version,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key) DO UPDATE SET last_message_id=excluded.last_message_id,last_timestamp=excluded.last_timestamp,summary_json=excluded.summary_json,summary_version=excluded.summary_version,optimistic_version=excluded.optimistic_version,updated_at=excluded.updated_at',(key,chat_id,int(last['telegram_message_id']),int(last['created_at']),payload,sv,version+1,now))
+                else:
+                    conn.execute('INSERT INTO group_context_state(chat_id,last_message_id,last_timestamp,summary_json,summary_version,optimistic_version,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET last_message_id=excluded.last_message_id,last_timestamp=excluded.last_timestamp,summary_json=excluded.summary_json,summary_version=excluded.summary_version,optimistic_version=excluded.optimistic_version,updated_at=excluded.updated_at',(chat_id,int(last['telegram_message_id']),int(last['created_at']),payload,sv,version+1,now))
+                conn.execute('COMMIT');return True
 
-    async def get_recent(self, chat_id: int, limit: int = 40) -> list[dict[str, Any]]:
+    async def get_recent(self, chat_id: int, limit: int = 40, *, platform: str | None = None, account_scope: str | None = None) -> list[dict[str, Any]]:
         async with self._lock:
             with self._conn() as conn:
-                rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
+                if platform and account_scope:
+                    rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? AND platform=? AND account_scope=? ORDER BY id DESC LIMIT ?', (chat_id, platform, account_scope, limit)).fetchall()
+                else:
+                    rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [dict(r) for r in reversed(rows)]
 
-    async def get_recent_since(self, chat_id: int, *, since_ts: int, limit: int = 5000) -> list[dict[str, Any]]:
+    async def get_recent_since(self, chat_id: int, *, since_ts: int, limit: int = 5000, platform: str | None = None, account_scope: str | None = None) -> list[dict[str, Any]]:
         async with self._lock:
             with self._conn() as conn:
-                rows = conn.execute(
-                    'SELECT * FROM recent_messages '
-                    'WHERE chat_id=? AND created_at>=? ORDER BY id DESC LIMIT ?',
-                    (chat_id, int(since_ts), max(1, int(limit))),
-                ).fetchall()
+                if platform and account_scope:
+                    rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? AND platform=? AND account_scope=? AND created_at>=? ORDER BY id DESC LIMIT ?', (chat_id, platform, account_scope, int(since_ts), max(1, int(limit)))).fetchall()
+                else:
+                    rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? AND created_at>=? ORDER BY id DESC LIMIT ?', (chat_id, int(since_ts), max(1, int(limit)))).fetchall()
                 return [dict(r) for r in reversed(rows)]
 
     async def upsert_profile(self, chat_id: int, sender_id: int, label: str, *, username: str = '', display_name: str = '', nicknames: list[str] | None = None, topics: list[str] | None = None, projects: list[str] | None = None, style_notes: list[str] | None = None, reputation_delta: int = 0) -> None:
@@ -2259,9 +2310,9 @@ class ZeroStore:
                 rows = conn.execute('SELECT doc_id FROM sticker_send_history WHERE chat_id=? ORDER BY sent_at DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [int(row['doc_id']) for row in rows]
 
-    async def get_sticker_send_policy(self, chat_id: int) -> dict[str, int]:
+    async def get_sticker_send_policy(self, chat_id: int, window_seconds: int = 3600) -> dict[str, int]:
         """Return chat-scoped sticker send counters without using labels."""
-        now = int(time.time()); window_cutoff = now - 120
+        now = int(time.time()); window_cutoff = now - max(1, int(window_seconds))
         async with self._lock:
             with self._conn() as conn:
                 count = int(conn.execute('SELECT COUNT(*) AS c FROM sticker_send_history WHERE chat_id=? AND sent_at>=?', (chat_id, window_cutoff)).fetchone()['c'])
