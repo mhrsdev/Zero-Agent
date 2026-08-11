@@ -1,4 +1,5 @@
 from __future__ import annotations
+from conftest import CONFIG_EXAMPLE
 
 import asyncio
 import json
@@ -92,7 +93,7 @@ class RaisingDeepWeb(CapturingDeepWeb):
 
 
 def build_config(tmp_path: Path, *, enabled: bool = True) -> ZeroConfig:
-    base = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    base = ZeroConfig.load(CONFIG_EXAMPLE)
     return base.model_copy(update={
         'memory': base.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')}),
         'web': base.web.model_copy(update={

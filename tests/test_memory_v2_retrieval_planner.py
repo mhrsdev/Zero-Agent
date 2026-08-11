@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import asyncio,json,time
 from zero.memory_v2.retrieval_planner import parse,window
 from zero.brain import ZeroBrain
@@ -20,7 +21,7 @@ class Router:
 
 async def _evidence(tmp_path,monkeypatch):
  monkeypatch.setenv('ZERO_MEMORY_V3_PLANNER_ENABLED','true')
- cfg=ZeroConfig.load('/root/zero/config/zero.example.yaml');cfg=cfg.model_copy(update={'memory':cfg.memory.model_copy(update={'db_path':str(tmp_path/'v1.db')})})
+ cfg=ZeroConfig.load(CONFIG_EXAMPLE);cfg=cfg.model_copy(update={'memory':cfg.memory.model_copy(update={'db_path':str(tmp_path/'v1.db')})})
  store=ZeroStore(cfg.memory.db_path);brain=ZeroBrain(cfg,store,Router())
  await store.append_recent(-1,2,'member','user','bounded historical statement',telegram_message_id=9)
  msg=IncomingMessage(-1,'g',1,'speaker','@member هفته پیش درباره من چی گفت؟',resolved_mention_user_ids=(2,))

@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from .configuration import ConfigStore, canonical_config_path
+from .paths import zero_home_path
 
 
-def runtime_config_path(default: str | Path = "/root/zero/config/zero.yaml") -> str:
-    """Return the one legacy-runtime path used by all composition roots."""
-    return os.environ.get("ZERO_CONFIG_PATH", str(default))
+def runtime_config_path(default: str | Path | None = None) -> str:
+    """Return the portable legacy-runtime path used by composition roots."""
+    fallback = Path(default) if default is not None else zero_home_path("config", "zero.yaml")
+    return os.environ.get("ZERO_CONFIG_PATH", str(fallback))
 
 
 def load_effective_config(legacy_path: str | Path | None, config_type: Any):

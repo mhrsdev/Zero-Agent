@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import pytest
 from zero.brain import ZeroBrain
 from zero.config import ZeroConfig
@@ -13,7 +14,7 @@ class RecordingRouter:
 
 async def turn(tmp_path, monkeypatch, *, enabled=True, shadow=False):
     monkeypatch.setenv('ZERO_MEMORY_V3_DB',str(tmp_path/'v3.db'));monkeypatch.setenv('ZERO_MEMORY_V3_ENABLED',str(enabled).lower());monkeypatch.setenv('ZERO_MEMORY_V3_SHADOW',str(shadow).lower())
-    cfg=ZeroConfig.load('/root/zero/config/zero.example.yaml');cfg=cfg.model_copy(update={'memory':cfg.memory.model_copy(update={'db_path':str(tmp_path/'v1.db')})})
+    cfg=ZeroConfig.load(CONFIG_EXAMPLE);cfg=cfg.model_copy(update={'memory':cfg.memory.model_copy(update={'db_path':str(tmp_path/'v1.db')})})
     store=ZeroStore(cfg.memory.db_path); router=RecordingRouter(); brain=ZeroBrain(cfg,store,router)
     m=IncomingMessage(-1,'g',7,'u','zero marker query',mention_zero=True,message_id=1)
     await store.add_long_memory(-1,'marker','V1_MUST_NOT_REACH_PROMPT',created_by=7,subject_user_id=7,confidence=.99)

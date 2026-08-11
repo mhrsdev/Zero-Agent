@@ -13,8 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from zero.market_prices import NavasanPriceClient, PriceAPIError
+from zero.paths import zero_home
 
-DB = '/root/zero/runtime/state/zero.db'
+DB = zero_home() / "state" / "zero.db"
 ASSETS = {'18ayar': 'طلای ۱۸ عیار', 'sekkeh': 'سکه امامی'}
 FAR_EXPIRY = 4102444800
 

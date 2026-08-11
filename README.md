@@ -108,12 +108,35 @@ The panel is a real local adapter, not a promise that every maintenance action i
 ### TUI
 
 ```bash
+python -m zero setup                         # interactive canonical setup
+python -m zero setup --config /path/zero.json
 python -m zero tui
 python -m zero tui --print
-python -m zero tui --print --panel doctor
+python -m zero tui --print --panel setup
+python -m zero tui --print --panel chat
 ```
 
-Available panels are `status`, `doctor`, `groups`, `backup`, `logs`, and `setup`.
+The interactive TUI also has a conversational `Chat` panel. It uses the real
+ZeroBrain policy/router/memory path and keeps sessions in the current process:
+
+```bash
+python -m zero tui --panel chat --runtime-config /path/to/zero.yaml
+```
+
+Chat commands are `/help`, `/new`, `/clear`, `/sessions`, `/use <id>`, and
+`/quit`. Zero's current router returns completed responses rather than a token
+stream, so the TUI reports truthful thinking/completion progress and never
+simulates token streaming. Provider credentials remain in the protected runtime
+secret configuration and are never entered into the chat UI.
+
+Interactive controls: `1`–`7` select panels, `Tab` or `←/→` navigates,
+`↑/↓`/`j`/`k` scroll, `PageUp`/`PageDown` jump, `Home`/`End` move to the
+bounds, `r` refreshes (and explicitly creates a backup only on the Backup
+panel), `Enter` starts the Setup wizard from the Setup panel, and `q`/`Esc`
+exits. The setup wizard persists only canonical settings and symbolic secret
+references; it never asks for or stores raw provider, Telegram, or session
+credentials.
+
 
 ## Installation
 

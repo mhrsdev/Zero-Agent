@@ -104,10 +104,20 @@ class SetupService:
         except FileNotFoundError:
             self._config = CanonicalConfig(installation_id=installation_id)
 
+    def apply_profile(self, *, installation_id: str) -> SetupState:
+        """Persist the installation identity used by all local components."""
+        installation_id = installation_id.strip()
+        if not installation_id or len(installation_id) > 128:
+            return SetupState(config=self._config)
+        candidate = self._config.model_copy(update={"installation_id": installation_id})
+        self.store.save(candidate)
+        self._config = candidate
+        return SetupState(config=candidate, completed_steps=("profile",))
+
     def apply_telegram(
         self,
         *,
-        mode: Literal["bot", "user_session", "hybrid"],
+        mode: Literal["disabled", "bot", "user_session", "hybrid"],
         bot_token_ref: str | None = None,
         api_id: int | None = None,
         api_hash_ref: str | None = None,

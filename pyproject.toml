@@ -1,3 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zero-agent"
+version = "0.1.0a0"
+description = "Self-hosted Telegram AI companion and administration console"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "telethon==1.44.0",
+  "aiogram==3.13.1",
+  "PyYAML==6.0.2",
+  "aiosqlite==0.20.0",
+  "pydantic==2.9.2",
+  "python-dotenv==1.0.1",
+]
+
+[project.scripts]
+zero = "zero.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["zero*", "scripts*"]
+exclude = ["tests*", "panel*", "config*", "runtime*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"

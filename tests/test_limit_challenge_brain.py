@@ -1,4 +1,6 @@
+from conftest import CONFIG_EXAMPLE
 import asyncio
+from unittest.mock import AsyncMock
 from pathlib import Path
 
 from zero.brain import ZeroBrain
@@ -16,7 +18,7 @@ class NoCallRouter:
 
 def test_real_configured_limit_offers_challenge_and_bonus_bypasses_refusal(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={
             'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')}),
             'policy': config.policy.model_copy(update={
@@ -44,14 +46,14 @@ def test_real_configured_limit_offers_challenge_and_bonus_bypasses_refusal(tmp_p
 
         await store.upsert_limit_challenge_progress(55, -99, bonus_quota=1)
         decision, text = await brain._pre_check(message)
-        assert decision is None and text == ''
+        assert decision is not None and decision.should_reply and decision.continue_generation and text == ''
         assert (await store.get_limit_challenge_progress(55, -99))['bonus_quota'] == 0
     asyncio.run(scenario())
 
 
 def test_zero_user_limits_disable_only_human_quota(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={
             'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')}),
             'policy': config.policy.model_copy(update={
@@ -66,13 +68,13 @@ def test_zero_user_limits_disable_only_human_quota(tmp_path: Path):
         for _ in range(100):
             await store.add_rate_event(55, 'reply', message.chat_id)
         decision, text = await brain._pre_check(message)
-        assert decision is None and text == ''
+        assert decision is not None and decision.should_reply and decision.continue_generation and text == ''
     asyncio.run(scenario())
 
 
 def test_bot_chain_limit_is_silent_only_for_mynovachatbot(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
         store = ZeroStore(config.memory.db_path)
         brain = ZeroBrain(config, store, NoCallRouter())
@@ -90,20 +92,21 @@ def test_bot_chain_limit_is_silent_only_for_mynovachatbot(tmp_path: Path):
 
 def test_search_command_reaches_normal_reply_path(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
         brain = ZeroBrain(config, ZeroStore(config.memory.db_path), NoCallRouter())
         decision, text = await brain._pre_check(IncomingMessage(
             chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/search آخرین اخبار',
         ))
-        assert decision is None
+        assert decision is not None
+        assert decision.should_reply and decision.continue_generation
         assert text == ''
     asyncio.run(scenario())
 
 
 def test_search_command_without_query_returns_usage_without_llm(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
         brain = ZeroBrain(config, ZeroStore(config.memory.db_path), NoCallRouter())
 
@@ -119,7 +122,7 @@ def test_search_command_without_query_returns_usage_without_llm(tmp_path: Path):
 
 def test_social_awareness_silences_direct_member_conversation_before_llm(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
         brain = ZeroBrain(config, ZeroStore(config.memory.db_path), NoCallRouter())
         decision, text = await brain._pre_check(IncomingMessage(
@@ -133,11 +136,27 @@ def test_social_awareness_silences_direct_member_conversation_before_llm(tmp_pat
 
 def test_direct_zero_trigger_is_not_silenced_by_sensitive_social_context(tmp_path: Path):
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
         brain = ZeroBrain(config, ZeroStore(config.memory.db_path), NoCallRouter())
         decision, text = await brain._pre_check(IncomingMessage(
             chat_id=-99, chat_title='t', sender_id=55, sender_label='u', text='زیرو خیلی ناراحتم، کمکم کن',
         ))
-        assert decision is None and text == ''
+        assert decision is not None and decision.should_reply and decision.continue_generation and text == ''
+    asyncio.run(scenario())
+
+
+def test_direct_gif_request_enters_media_path_without_mention(tmp_path: Path):
+    async def scenario():
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
+        config = config.model_copy(update={"memory": config.memory.model_copy(update={"db_path": str(tmp_path / "zero.db")})})
+        brain = ZeroBrain(config, ZeroStore(config.memory.db_path), NoCallRouter())
+        brain._should_interject = AsyncMock(return_value=False)
+        decision, text = await brain._pre_check(IncomingMessage(
+            chat_id=-99, chat_title="t", sender_id=55, sender_label="u",
+            text="یه گیف خنده دار بفرست",
+        ))
+        assert decision is not None
+        assert decision.should_reply and decision.continue_generation
+        assert text == ""
     asyncio.run(scenario())

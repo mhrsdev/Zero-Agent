@@ -130,7 +130,7 @@ def test_legacy_zero_memory_migration_keeps_personal_and_group_ownership(tmp_pat
         service = MemoryV3Service(str(tmp_path / "v3.db"))
         result = await service.migrate_legacy_zero(str(source))
         assert result["items"] == 2
-        text, _ = await service.context(message(chat=-100, sender=7))
+        text, _ = await service.context(message(chat=-100, sender=7, text="چی از من یادت هست و پروژه چه شد؟"))
         assert "قهوهٔ تلخ" in text and "جلسهٔ پروژه چهارشنبه" in text
         assert "قهوهٔ تلخ" not in (await service.context(message(chat=-200, sender=7)))[0]
 

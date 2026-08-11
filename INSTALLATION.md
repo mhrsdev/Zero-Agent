@@ -381,7 +381,27 @@ python -m zero tui --print --panel logs --tail 50
 python -m zero tui --print --panel setup
 ```
 
-The TUI accepts `--store PATH` and `--config PATH` when inspecting a specific database or canonical JSON config.
+Interactive setup is available either as a standalone command or from the Setup
+panel with `Enter`:
+
+```bash
+python -m zero setup
+python -m zero setup --config /path/to/zero.json --panel-db /path/to/panel.db
+```
+
+The wizard writes canonical JSON atomically through `SetupService`, records
+progress in `PanelStore`, validates Telegram mode requirements, and accepts
+only symbolic references such as `telegram.bot_token`. Put actual values in
+the protected secret store described above; raw credentials are never entered
+into the TUI.
+
+TUI controls: `1`–`7` select panels; `Tab`, `←`, and `→` navigate; `↑`, `↓`,
+`j`, and `k` scroll; `PageUp`, `PageDown`, `Home`, and `End` move through long
+panels; `r` refreshes; `Enter` starts setup from the Setup panel; and `q` or
+`Esc` exits. Interactive redraws are read-only. Backup creation happens only
+for the explicit `--print --panel backup` command or when `r` is pressed while
+the Backup panel is active.
+
 
 ## Health checks
 

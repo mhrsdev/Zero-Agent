@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import pytest
 
 from zero.config import ZeroConfig
@@ -6,7 +7,7 @@ from zero.router import IndependentRouter
 
 
 def cfg(tmp_path):
-    c = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    c = ZeroConfig.load(CONFIG_EXAMPLE)
     return c.model_copy(update={
         'memory': c.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')}),
         'web': c.web.model_copy(update={'enabled': True, 'google_grounding_enabled': True}),

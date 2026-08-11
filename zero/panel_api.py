@@ -18,6 +18,7 @@ from aiohttp import web
 
 from .runtime_control import listener_status
 from .panel_store import DuplicateAdminError, PanelStore
+from .paths import zero_home_path
 
 _PAGE_MAX = 100
 _SECRET = re.compile(r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;]+)|\b[A-Za-z0-9_-]{32,}\b")
@@ -364,7 +365,7 @@ class PanelAPI:
         return web.json_response({'active':self.config.router.normal_primary,'fallback':[self.config.router.normal_fallback],'strategy':self.config.router.strategy,'search_provider':self.config.router.search_provider,'google_grounding':self.config.web.google_grounding_enabled,'providers':providers})
 
     def _read_logs(self,*,limit=50,level='',component='',trace=''):
-        paths=[Path(self.config.logs.listener_log),Path(self.config.logs.panel_log),Path(self.config.logs.router_log),Path('/root/zero/runtime/logs/requests.log')];items=[]
+        paths=[Path(self.config.logs.listener_log),Path(self.config.logs.panel_log),Path(self.config.logs.router_log),zero_home_path('logs', 'requests.log')];items=[]
         for path in paths:
             if not path.exists():continue
             for line in path.read_text(errors='replace').splitlines()[-2000:]:
@@ -405,12 +406,21 @@ class PanelAPI:
     async def _session_list(self,request):self._require(request);return web.json_response({'items':[{k:v for k,v in x.items() if k!='csrf'} for x in self.sessions.values()]})
     async def _session_revoke(self,request):
         s=self._require(request,csrf=True,write=True);sid=request.match_info['session_id'];before=len(self.sessions);self.sessions={k:v for k,v in self.sessions.items() if v['id']!=sid};self._audit('SESSION_REVOKED',s,session_id=sid);return web.json_response({'revoked':before-len(self.sessions)})
-    def _secret_status(self,path):
-        p=Path(path);return {'configured':p.exists() and p.stat().st_size>0,'permission_valid':p.exists() and (p.stat().st_mode & 0o077)==0,'last_rotated':int(p.stat().st_mtime) if p.exists() else None}
+    def _secret_status(self, path):
+        p = Path(path)
+        try:
+            details = p.stat()
+        except OSError:
+            return {'configured': False, 'permission_valid': False, 'last_rotated': None}
+        return {
+            'configured': details.st_size > 0,
+            'permission_valid': (details.st_mode & 0o077) == 0,
+            'last_rotated': int(details.st_mtime),
+        }
     async def _settings(self,request):
         self._require(request);overrides={k:self._redact(v) for k,v in (await self.store.panel_get_settings(_ALLOWED_SETTINGS)).items()}
         cfg={'telegram':{'account_username':self.config.listener.account_username,'allowed_groups':self.config.listener.allowed_group_usernames},'memory':{'recent_messages_limit':self.config.memory.recent_messages_limit,'long_term_limit':self.config.memory.long_term_limit},'router':{'primary':self.config.router.normal_primary,'fallback':self.config.router.normal_fallback,'strategy':self.config.router.strategy},'search':{'web_enabled':self.config.web.enabled},'limits':self.config.policy.model_dump(),'reaction':self.config.reactions.model_dump(),'sticker':self.config.stickers.model_dump()}
-        secrets_state={'management_bot':self._secret_status(self.config.management_bot.token_file),'provider_secrets':self._secret_status(os.environ.get('ZERO_SECRET_FILE','/root/zero/runtime/secrets/zero.secrets.yaml'))}
+        secrets_state={'management_bot':self._secret_status(self.config.management_bot.token_file),'provider_secrets':self._secret_status(os.environ.get('ZERO_SECRET_FILE', str(zero_home_path('secrets', 'zero.secrets.yaml'))))}
         return web.json_response({'config':cfg,'overrides':overrides,'secrets':secrets_state,'editable':sorted(_ALLOWED_SETTINGS)})
     async def _setting_update(self,request):
         s=self._require(request,csrf=True,write=True);key=request.match_info['key'];body=await self._body(request)

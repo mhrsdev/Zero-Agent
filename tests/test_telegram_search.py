@@ -1,3 +1,4 @@
+from conftest import CONFIG_RUNTIME
 import asyncio
 
 import pytest
@@ -78,7 +79,7 @@ async def test_cache_persists_and_unavailable_is_not_cached(tmp_path):
     class Router:
         def __init__(self, store, provider): self.state=TelegramSearchConversationState(store=store); self.provider=provider
         async def search(self, req): return [await self.provider.search(req)]
-    cfg=ZeroConfig.load('/root/zero/config/zero.yaml'); store=ZeroStore(str(tmp_path/'cache.db')); await store.set_setting('tgsearch_enabled','true')
+    cfg=ZeroConfig.load(CONFIG_RUNTIME); store=ZeroStore(str(tmp_path/'cache.db')); await store.set_setting('tgsearch_enabled','true')
     good=Provider(True); client=TelegramSearchClient(cfg,store); client.router=Router(store,good); req=lambda q: TelegramSearchRequest('t',1,2,query=q,intent='joined_dialog_search',requested_sources=('joined_dialogs',))
     await client.search_request(req('cacheable')); await client.search_request(req('cacheable')); assert good.calls == 1
     bad=Provider(False); client2=TelegramSearchClient(cfg,ZeroStore(str(tmp_path/'cache.db'))); client2.router=Router(client2.store,bad); await client2.search_request(req('unavailable')); await client2.search_request(req('unavailable')); assert bad.calls == 2

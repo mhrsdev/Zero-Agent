@@ -1,4 +1,5 @@
 from __future__ import annotations
+from conftest import PANEL_DIR, ROOT
 
 import ast
 import re
@@ -60,7 +61,7 @@ async def panel(tmp_path):
     cfg=config(tmp_path);Path(cfg.management_bot.token_file).write_text('configured');Path(cfg.management_bot.token_file).chmod(0o600)
     store=ZeroStore(cfg.memory.db_path);await store.append_recent(10,20,'کاربر','user','پیام تست')
     semantic=SemanticUserMemory(cfg.memory.db_path);candidate=semantic.candidate(chat_id=10,sender_id=20,category='interest',key='topic',value='AI',confidence=.9,evidence_message_ids=[1]);semantic.approve(candidate,cfg.owner_user_id)
-    bot=FakeBot();api=PanelAPI(cfg,store,FakeRouter(),bot,static_dir='/root/zero/panel',services={'knowledge':FakeKnowledge(),'jobs':FakeJobs(),'semantic':semantic,'experience':ExperienceMemory(cfg.memory.db_path),'procedure':ProceduralMemory(cfg.memory.db_path),'world':WorldModel(cfg.memory.db_path)})
+    bot=FakeBot();api=PanelAPI(cfg,store,FakeRouter(),bot,static_dir=str(PANEL_DIR),services={'knowledge':FakeKnowledge(),'jobs':FakeJobs(),'semantic':semantic,'experience':ExperienceMemory(cfg.memory.db_path),'procedure':ProceduralMemory(cfg.memory.db_path),'world':WorldModel(cfg.memory.db_path)})
     client=TestClient(TestServer(api.app));await client.start_server()
     yield client,api,bot,cfg
     await client.close()
@@ -119,7 +120,7 @@ async def test_readiness_bounded_pagination_sse_and_secret_protection(panel):
 
 
 def test_panel_routes_have_no_direct_sql_boundary():
-    source=Path('/root/zero/zero/panel_api.py').read_text()
+    source=(ROOT / "zero" / "panel_api.py").read_text()
     tree=ast.parse(source)
     assert 'sqlite3' not in source
     assert '.execute(' not in source
@@ -127,7 +128,7 @@ def test_panel_routes_have_no_direct_sql_boundary():
 
 
 def test_production_unit_keeps_hardening_and_external_config():
-    unit=Path('/root/zero/deploy/zero-panel.service').read_text()
+    unit=(ROOT / "deploy" / "zero-panel.service").read_text()
     assert 'User=zero' in unit and 'Group=zero' in unit
     assert 'ProtectHome=read-only' in unit and 'ProtectSystem=strict' in unit and 'UMask=0077' in unit
     assert 'ZERO_CONFIG_PATH=/etc/zero/zero.yaml' in unit

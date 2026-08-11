@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 from types import SimpleNamespace
 
 import pytest
@@ -11,8 +12,9 @@ from zero.storage import ZeroStore
 
 @pytest.mark.asyncio
 async def test_router_parses_gemini_function_call(tmp_path):
-    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    config = ZeroConfig.load(CONFIG_EXAMPLE)
     config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
+    config.router.providers.gemini.keys = ["unit-test-key"]
     router = IndependentRouter(config)
     captured = {}
 
@@ -30,7 +32,7 @@ async def test_router_parses_gemini_function_call(tmp_path):
 
 @pytest.mark.asyncio
 async def test_brain_executes_knowledge_tool(tmp_path):
-    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    config = ZeroConfig.load(CONFIG_EXAMPLE)
     config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'zero.db')})})
     store = ZeroStore(config.memory.db_path)
 

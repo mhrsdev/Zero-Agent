@@ -17,6 +17,7 @@ from zero.vision import VisionProcessor
 from zero.stickers.models import Sticker, StickerSet, StickerCandidate
 from zero.stickers.account_saver import StickerAccountSaver
 from zero.stickers.sender import StickerSender
+from zero.stickers.classifier import StickerClassifier
 
 logger = logging.getLogger('zero.stickers.observer')
 
@@ -38,6 +39,7 @@ class StickerObserver:
         self._temp_dir = tempfile.gettempdir()
         self.account_saver = StickerAccountSaver(config, store, client)
         self.sender = StickerSender(config, store, client)
+        self.classifier = StickerClassifier(config, store, vision)
 
     def is_sticker_media(self, event) -> bool:
         """Check if the event contains a sticker."""
@@ -145,28 +147,68 @@ class StickerObserver:
         return sticker
 
     async def process_gif(self, event, sender_id: int, sender_label: str, chat_id: int):
-        """Store an incoming Telegram animation/GIF in the shared media library."""
-        doc = getattr(event, 'document', None)
+        """Store a Telegram animation with bounded, caption-derived semantics."""
+        doc = getattr(event, "document", None)
         if not doc:
+            logger.info("GIF_INGESTION_SKIPPED reason=unsupported_media")
             return None
         now = int(time.time())
+        caption = (getattr(event, "raw_text", "") or "").strip()[:1000]
+        vision_tags = self.classifier.extract_vision_tags(caption) if caption else ""
+        nsfw_score = self.classifier.calculate_nsfw_score(caption) if caption else 0.0
         existing = await self.store.get_sticker(doc.id)
         if existing:
             await self.store.increment_sticker_usage(doc.id, sender_id)
-            await self.store.update_sticker_file_reference(doc.id, doc.file_reference, doc.access_hash)
-            await self.store.record_sticker_observation(doc.id, chat_id, sender_id, int(getattr(event, 'id', 0) or 0))
+            await self.store.update_sticker_file_reference(
+                doc.id, doc.file_reference, doc.access_hash
+            )
+            await self.store.record_sticker_observation(
+                doc.id, chat_id, sender_id, int(getattr(event, "id", 0) or 0)
+            )
+            if caption and (not existing.vision_summary or not existing.mood_tags):
+                await self.store.update_sticker_vision(
+                    doc.id, caption, vision_tags, nsfw_score
+                )
+                existing.vision_summary = caption
+                existing.vision_tags = vision_tags
+                existing.nsfw_score = nsfw_score
+                await self.classifier.classify_sticker(existing)
+                logger.info(
+                    "GIF_SEMANTICS_BACKFILLED doc_id=%s tags=%s",
+                    doc.id, vision_tags or "none",
+                )
             return await self.store.get_sticker(doc.id)
         media = Sticker(
-            doc_id=doc.id, access_hash=doc.access_hash, file_reference=doc.file_reference,
-            mime_type=doc.mime_type or 'video/mp4', emoji='', stickerset_id=None,
-            stickerset_access_hash=None, stickerset_short_name=None, is_animated=False,
-            is_video=True, first_seen=now, last_seen=now, first_sender_id=sender_id,
+            doc_id=doc.id,
+            access_hash=doc.access_hash,
+            file_reference=doc.file_reference,
+            mime_type=doc.mime_type or "video/mp4",
+            emoji="",
+            stickerset_id=None,
+            stickerset_access_hash=None,
+            stickerset_short_name=None,
+            is_animated=False,
+            is_video=True,
+            vision_summary=caption or None,
+            vision_tags=vision_tags or None,
+            nsfw_score=nsfw_score,
+            first_seen=now,
+            last_seen=now,
+            first_sender_id=sender_id,
             usage_count=1,
         )
         await self.store.add_sticker(media)
-        await self.store.record_sticker_observation(doc.id, chat_id, sender_id, int(getattr(event, 'id', 0) or 0))
-        logger.info('GIF_OBSERVED doc_id=%s chat_id=%s sender_id=%s message_id=%s', doc.id, chat_id, sender_id, getattr(event, 'id', 0))
-        return media
+        await self.store.record_sticker_observation(
+            doc.id, chat_id, sender_id, int(getattr(event, "id", 0) or 0)
+        )
+        await self.classifier.classify_sticker(media)
+        logger.info(
+            "GIF_OBSERVED doc_id=%s chat_id=%s sender_id=%s message_id=%s tags=%s",
+            doc.id, chat_id, sender_id, getattr(event, "id", 0),
+            vision_tags or "none",
+        )
+        return await self.store.get_sticker(doc.id)
+
     async def _process_stickerset(self, short_name: str) -> None:
         """Fetch and store stickerset info."""
         try:
@@ -210,6 +252,10 @@ class StickerObserver:
             # Analyze with vision
             question = "Describe this sticker/image. What text, objects, emotions, or memes does it contain? Is it NSFW, offensive, or political?"
             result = await self.vision.analyze(temp_path, question=question)
+            if not (result or "").strip():
+                logger.info("STICKER_VISION_SKIPPED doc_id=%s reason=no_semantic_signature", sticker.doc_id)
+                return
+            result = result.strip()
 
             # Update sticker with vision results
             vision_summary = result[:500] if result else ''
@@ -238,96 +284,13 @@ class StickerObserver:
                     pass
 
     def _extract_vision_tags(self, summary: str) -> str:
-        """Extract tags from vision summary."""
-        tags = []
-        summary_lower = summary.lower()
-
-        tag_keywords = {
-            'meme': ['meme', 'funny', 'lol', 'laugh', 'humor'],
-            'text': ['text', 'writing', 'caption', 'quote', 'word'],
-            'character': ['character', 'anime', 'cartoon', 'figure', 'person'],
-            'animal': ['cat', 'dog', 'animal', 'pet', 'cute'],
-            'reaction': ['reaction', 'react', 'face', 'expression'],
-            'code': ['code', 'programming', 'terminal', 'developer', 'bug'],
-            'gaming': ['game', 'gaming', 'play', 'controller'],
-            'crypto': ['crypto', 'bitcoin', 'eth', 'blockchain', 'token'],
-        }
-
-        for tag, keywords in tag_keywords.items():
-            if any(k in summary.lower() for k in keywords):
-                tags.append(tag)
-
-        return ','.join(tags) if tags else ''
+        return self.classifier.extract_vision_tags(summary)
 
     def _calculate_nsfw_score(self, summary: str) -> float:
-        """Calculate NSFW score from vision summary."""
-        nsfw_keywords = [
-            'nude', 'naked', 'sex', 'porn', 'explicit', 'adult', 'nsfw',
-            'sexual', 'erotic', 'breast', 'genital', 'penis', 'vagina',
-        ]
-        summary_lower = summary.lower()
-        score = sum(1 for kw in nsfw_keywords if kw in summary_lower)
-        return min(score * 0.2, 1.0)
+        return self.classifier.calculate_nsfw_score(summary)
 
     async def _classify_sticker(self, sticker) -> None:
-        """Classify sticker mood, quality, and spam score."""
-        mood_tags = []
-        quality_score = 0.55  # Valid stickers start at 0.55, not 0.5
-        spam_score = 0.0
-
-        # Vision-based classification
-        if sticker.vision_tags:
-            vision_tag_list = sticker.vision_tags.split(',')
-            mood_tags.extend(vision_tag_list)
-
-        # Emoji-based classification (deduplicated)
-        emoji_moods = {
-            '😂': 'funny', '🤣': 'funny', '💩': 'funny',
-            '😭': 'sad', '😢': 'sad', '😥': 'sad',
-            '😍': 'love', '❤️': 'love', '💕': 'love', '💖': 'love',
-            '😎': 'cool', '😏': 'cool',
-            '😡': 'angry', '🤬': 'angry',
-            '😱': 'shock', '😲': 'shock', '😳': 'shock',
-            '🤔': 'react', '😐': 'react', '🫡': 'react',
-            '💀': 'react', '👍': 'greeting', '👋': 'greeting',
-            '🙏': 'greeting', '🎉': 'react', '🔥': 'react',
-            '💯': 'react', '✨': 'react',
-        }
-
-        for emoji, mood in emoji_moods.items():
-            if emoji in (sticker.emoji or ''):
-                mood_tags.append(mood)
-
-        # Quality based on vision analysis
-        if sticker.vision_summary:
-            summary_len = len(sticker.vision_summary)
-            if summary_len > 100:
-                quality_score = min(0.55 + len(sticker.vision_summary) / 500, 1.0)
-            else:
-                quality_score = 0.55
-
-        # Spam detection - simple heuristics
-        if sticker.usage_count > 10 and sticker.quality_score < 0.3:
-            spam_score = 0.5
-
-        # NSFW boost
-        if sticker.nsfw_score > 0.5:
-            quality_score = 0.1
-            spam_score = max(spam_score, 0.8)
-
-        # Update in database
-        mood_tags_str = ','.join(set(mood_tags)) if mood_tags else ''
-        await self.store.update_sticker_classification(
-            sticker.doc_id,
-            mood_tags_str,
-            quality_score,
-            spam_score
-        )
-
-        # Update sticker object
-        sticker.mood_tags = mood_tags_str
-        sticker.quality_score = quality_score
-        sticker.spam_score = spam_score
+        await self.classifier.classify_sticker(sticker)
 
     async def should_auto_save(self, sticker) -> bool:
         """Check if sticker should be auto-saved to account."""

@@ -65,10 +65,15 @@ class MemoryService:
 
     # ---- boundary ------------------------------------------------------
 
-    async def context(self, message: Any, *, target_user_id: int | None = None, target_user_ids: tuple[int, ...] = ()):
+    async def context(self, message: Any, *, target_user_id: int | None = None, identity_lookup: bool = False, target_user_ids: tuple[int, ...] = ()):
         self._require(Permission.READ_MEMORY)
         self._guard_message(message)
-        return await self.backend.context(message, target_user_id=target_user_id, target_user_ids=target_user_ids)
+        return await self.backend.context(
+            message,
+            target_user_id=target_user_id,
+            identity_lookup=identity_lookup,
+            target_user_ids=target_user_ids,
+        )
 
     async def put(self, item: Any) -> str:
         self._require(Permission.WRITE_MEMORY)

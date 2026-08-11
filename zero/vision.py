@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from .config import ZeroConfig
@@ -81,29 +82,55 @@ class VisionRateLimiter:
 
 
 async def download_media(event, config: ZeroConfig, max_size_mb: int = 10) -> str | None:
-    """Download media from Telegram event to temp file. Returns local path or None."""
-    try:
-        if not event.media:
-            return None
-        max_bytes = max_size_mb * 1024 * 1024
-        file = await event.download_media(file=bytes)
-        if isinstance(file, (bytes, bytearray)):
-            if len(file) > max_bytes:
-                return None
-            mime = media_mime_type(event)
-            suffix = mimetypes.guess_extension(mime or '') or Path(getattr(getattr(event, 'file', None), 'name', '') or 'media').suffix.lower()
-            if suffix == '.jpe': suffix = '.jpg'
-            if suffix not in config.vision.allowed_extensions and mime not in {'video/mp4', 'video/webm', 'application/x-tgsticker'}:
-                suffix = ".jpg"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(file)
-                return f.name
-        elif isinstance(file, str):
-            if os.path.getsize(file) > max_bytes:
-                return None
-            return file
+    """Download one supported Telegram media item into a bounded temporary file."""
+    if not getattr(event, "media", None):
+        logger.warning("VISION_DOWNLOAD_FAILED reason=no_media")
         return None
-    except Exception:
+    max_bytes = max(1, int(max_size_mb)) * 1024 * 1024
+    document = getattr(event, "document", None)
+    declared_size = int(getattr(document, "size", 0) or 0)
+    mime = media_mime_type(event)
+    supported_mimes = {
+        "image/jpeg", "image/png", "image/webp", "image/gif",
+        "video/mp4", "video/webm", "application/x-tgsticker",
+    }
+    if mime not in supported_mimes:
+        logger.warning("VISION_DOWNLOAD_FAILED reason=unsupported_mime media_mime=%s", mime or "unknown")
+        return None
+    if declared_size > max_bytes:
+        logger.warning(
+            "VISION_DOWNLOAD_FAILED reason=file_too_large media_mime=%s declared_bytes=%s limit_bytes=%s",
+            mime, declared_size, max_bytes,
+        )
+        return None
+    try:
+        downloaded = await event.download_media(file=bytes)
+        if isinstance(downloaded, (bytes, bytearray)):
+            if len(downloaded) > max_bytes:
+                logger.warning("VISION_DOWNLOAD_FAILED reason=file_too_large media_mime=%s", mime)
+                return None
+            suffixes = {
+                "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                "image/gif": ".gif", "video/mp4": ".mp4", "video/webm": ".webm",
+                "application/x-tgsticker": ".tgs",
+            }
+            with tempfile.NamedTemporaryFile(suffix=suffixes[mime], delete=False) as handle:
+                handle.write(downloaded)
+                return handle.name
+        if isinstance(downloaded, str):
+            path = Path(downloaded)
+            if path.stat().st_size <= max_bytes:
+                return str(path)
+            logger.warning("VISION_DOWNLOAD_FAILED reason=file_too_large media_mime=%s", mime)
+            if path.exists() and Path(tempfile.gettempdir()) in path.parents:
+                path.unlink(missing_ok=True)
+        logger.warning("VISION_DOWNLOAD_FAILED reason=empty_download media_mime=%s", mime)
+        return None
+    except Exception as exc:
+        logger.warning(
+            "VISION_DOWNLOAD_FAILED reason=download_exception media_mime=%s exception_type=%s",
+            mime or "unknown", type(exc).__name__,
+        )
         return None
 
 
@@ -155,7 +182,8 @@ def is_video_media(event) -> bool:
 def media_mime_type(event) -> str:
     if getattr(event, 'photo', None):
         return 'image/jpeg'
-    return getattr(getattr(event, 'document', None), 'mime_type', '') or 'image/jpeg'
+    document = getattr(event, 'document', None)
+    return (getattr(document, 'mime_type', '') or 'application/octet-stream') if document else ''
 
 
 async def extract_video_frames(media_path: str, max_frames: int = 3) -> list[str]:
@@ -239,18 +267,14 @@ async def analyze_image_with_gemini(image_path: str | list[str], prompt: str, ap
             data = json.loads(r.read().decode('utf-8'))
         return data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
 
-    try:
-        return await asyncio.to_thread(_call)
-    except Exception as e:
-        logger.warning('VISION_PROVIDER_FAILED mime=%s exception_type=%s', mime_type or 'unknown', type(e).__name__)
-        return ""
+    return await asyncio.to_thread(_call)
 
 
 def build_vision_prompt(*, question: str, caption: str | None = None) -> str:
     parts = [
         "تو Zero هستی، یه دوست و رفیقِ گروه. این عکس، GIF یا ویدئو را واقعاً بررسی کن و یه پاسخ کوتاه، طبیعی و فارسی بده.",
         "برای GIF/ویدئو فقط بر اساس فریم‌ها و محتوای قابل مشاهده جواب بده؛ اگر حرکت یا محتوای کافی قابل بررسی نیست، صادقانه بگو.",
-        "اگر عکس حاویزسی اسکرین‌شات یا کد/ارور هست، توضیح بده چی هست و اگه میشه راه‌حل بده.",
+        "اگر عکس حاوی اسکرین‌شات یا کد/ارور هست، توضیح بده چی هست و اگه میشه راه‌حل بده.",
         "اگر میم یا جوک هست، راجع بهش تیکه بزن.",
         "اگر متن فارسی/انگلسی داخل عکسه (OCR)، استخراج کن.",
         "اگه اطلاعات حساس (API key، پسورد، توکن) دیدی، فقط بگو 'اطلاعات حساس تشخیص داده شد' و نشون نده.",
@@ -262,6 +286,20 @@ def build_vision_prompt(*, question: str, caption: str | None = None) -> str:
     if caption:
         parts.append(f"کپشن تصویر: {caption}")
     return "\n".join(parts)
+
+
+@dataclass(frozen=True)
+class VisionAnalysisOutcome:
+    ok: bool
+    reason: str
+    text: str = ""
+    media_type: str = ""
+    frame_count: int = 0
+    exception_type: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {"ok": self.ok, "reason": self.reason, "media_type": self.media_type,
+                "frame_count": self.frame_count, "exception_type": self.exception_type}
 
 
 class VisionProcessor:
@@ -300,48 +338,68 @@ class VisionProcessor:
         prompt = build_vision_prompt(question=question)
         return await analyze_image_with_gemini(image_path, prompt, api_key, self.config.vision.model, 'image/webp') or None
 
-    async def process(self, event, *, question: str = "") -> str | None:
-        if not await self.is_tool_enabled():
-            logger.info('VISION_SKIPPED reason=disabled')
-            return None
-
-        user_id = event.sender_id
-        caption = getattr(event, 'raw_text', '') or ''
-
-        gif_or_video = is_gif_media(event) or is_video_media(event)
-        if gif_or_video:
-            ok, msg = await self.limiter.check_gif_limit(user_id)
-            if not ok:
-                logger.info('VISION_SKIPPED reason=rate_limit media=gif_or_video')
-                return None
-        else:
-            ok, msg = await self.limiter.check_image_limit(user_id)
-            if not ok:
-                logger.info('VISION_SKIPPED reason=rate_limit media=image')
-                return None
-
-        local_path = await download_media(event, self.config, self.config.vision.max_file_size_mb)
-        if not local_path:
-            logger.warning('VISION_SKIPPED reason=download_failed media_mime=%s', media_mime_type(event))
-            return None
-
+    async def process_outcome(self, event, *, question: str = "") -> VisionAnalysisOutcome:
+        media_type = ""
+        frames: list[str] = []
+        local_path: str | None = None
         try:
-            prompt = build_vision_prompt(question=question, caption=caption if caption else None)
-            api_key = self._next_key()
-            if not api_key:
-                logger.warning('VISION_UNAVAILABLE reason=missing_api_key')
-                return None
-            frame_paths = await extract_video_frames(local_path) if gif_or_video else []
-            analysis_paths = frame_paths or [local_path]
-            analysis_mime = 'image/jpeg' if frame_paths else media_mime_type(event)
-            logger.info('VISION_ANALYSIS_INPUT media_mime=%s frames=%s', media_mime_type(event), len(frame_paths))
-            result = await analyze_image_with_gemini(analysis_paths, prompt, api_key, self.config.vision.model, analysis_mime)
-            return result or None
+            if not await self.is_tool_enabled():
+                logger.info("VISION_SKIPPED reason=disabled")
+                return VisionAnalysisOutcome(False, "disabled")
+            animated = is_gif_media(event) or is_video_media(event)
+            supported = animated or is_image_media(event) or is_sticker_media(event)
+            media_type = media_mime_type(event)
+            if not supported:
+                logger.warning("VISION_SKIPPED reason=unsupported_media media_mime=%s", media_type)
+                return VisionAnalysisOutcome(False, "unsupported_media", media_type=media_type)
+            key = self._next_key()
+            if not key:
+                logger.warning("VISION_UNAVAILABLE reason=missing_api_key media_mime=%s", media_type)
+                return VisionAnalysisOutcome(False, "analysis_unavailable", media_type=media_type, exception_type="missing_api_key")
+            user_id = int(getattr(event, "sender_id", 0) or 0)
+            if animated:
+                allowed, _ = await self.limiter.check_gif_limit(user_id)
+            else:
+                allowed, _ = await self.limiter.check_image_limit(user_id)
+            if not allowed:
+                logger.info("VISION_SKIPPED reason=rate_limit media_mime=%s", media_type)
+                return VisionAnalysisOutcome(False, "rate_limit", media_type=media_type)
+            local_path = await download_media(event, self.config, self.config.vision.max_file_size_mb)
+            if not local_path:
+                logger.warning("VISION_SKIPPED reason=download_failed media_mime=%s", media_type)
+                return VisionAnalysisOutcome(False, "download_failed", media_type=media_type)
+            prompt = build_vision_prompt(question=question, caption=getattr(event, "raw_text", "") or None)
+            if animated:
+                frames = await extract_video_frames(local_path)
+                if not frames:
+                    logger.warning("VISION_ANALYSIS_FAILED reason=frame_extraction_failed media_mime=%s", media_type)
+                    return VisionAnalysisOutcome(False, "frame_extraction_failed", media_type=media_type)
+                paths: str | list[str] = frames
+                analysis_mime = "image/jpeg"
+            else:
+                paths = [local_path]
+                analysis_mime = media_type
+            logger.info("VISION_ANALYSIS_INPUT media_mime=%s frames=%s", media_type, len(frames))
+            result = await analyze_image_with_gemini(paths, prompt, key, self.config.vision.model, analysis_mime)
+            result = (result or "").strip()
+            if not result:
+                logger.warning("VISION_ANALYSIS_FAILED reason=empty_analysis media_mime=%s frames=%s", media_type, len(frames))
+                return VisionAnalysisOutcome(False, "no_semantic_signature", media_type=media_type, frame_count=len(frames))
+            logger.info("VISION_ANALYSIS_SUCCEEDED media_mime=%s frames=%s", media_type, len(frames))
+            return VisionAnalysisOutcome(True, "analyzed", text=result, media_type=media_type, frame_count=len(frames))
+        except asyncio.TimeoutError as exc:
+            logger.warning("VISION_ANALYSIS_FAILED reason=analysis_timeout media_mime=%s exception_type=%s", media_type or "unknown", type(exc).__name__)
+            return VisionAnalysisOutcome(False, "analysis_timeout", media_type=media_type, frame_count=len(frames), exception_type=type(exc).__name__)
+        except Exception as exc:
+            logger.exception("VISION_ANALYSIS_FAILED reason=analysis_exception media_mime=%s exception_type=%s", media_type or "unknown", type(exc).__name__)
+            return VisionAnalysisOutcome(False, "analysis_exception", media_type=media_type, frame_count=len(frames), exception_type=type(exc).__name__)
         finally:
-            try:
-                if local_path and os.path.exists(local_path):
-                    os.unlink(local_path)
-                for frame in locals().get('frame_paths', []):
-                    Path(frame).unlink(missing_ok=True)
-            except Exception:
-                pass
+            for path in ([local_path] if local_path else []) + frames:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("VISION_TEMP_CLEANUP_FAILED suffix=%s", Path(path).suffix.lower() or "unknown")
+
+    async def process(self, event, *, question: str = "") -> str | None:
+        outcome = await self.process_outcome(event, question=question)
+        return outcome.text if outcome.ok else None

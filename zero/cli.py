@@ -22,18 +22,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="run local diagnostics and report problems")
     sub.add_parser("panel", help="run the admin panel process")
     sub.add_parser("listener", help="run the Telegram listener process")
+    setup = sub.add_parser("setup", help="run the interactive canonical setup wizard")
+    setup.add_argument("--config", type=Path, default=None, help="Path to canonical config")
+    setup.add_argument("--panel-db", type=Path, default=None, help="Path to setup state database")
     tui_parser = sub.add_parser("tui", help="run the terminal admin interface")
     tui_parser.add_argument("--print", action="store_true",
                             help="Print the selected panel once and exit (non-interactive)")
     tui_parser.add_argument("--panel", default="status",
-                            choices=("status", "doctor", "groups", "backup", "logs", "setup"),
+                            choices=("status", "doctor", "groups", "backup", "logs", "setup", "chat"),
                             help="Which panel to display (default: status)")
     tui_parser.add_argument("--store", type=Path, default=None,
                             help="Path to ZeroStore database")
     tui_parser.add_argument("--config", type=Path, default=None,
                             help="Path to canonical config")
+    tui_parser.add_argument("--runtime-config", type=Path, default=None,
+                            help="Path to legacy runtime YAML used by Chat")
     tui_parser.add_argument("--tail", type=int, default=50,
                             help="Number of log lines to show (logs panel)")
+    tui_parser.add_argument("--no-animation", action="store_true",
+                            help="Skip the bounded interactive startup animation")
     config = sub.add_parser("config", help="inspect configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show")
@@ -137,6 +144,24 @@ def main(argv: list[str] | None = None) -> int:
         return _run_script("run_panel.py")
     if args.command == "listener":
         return _run_script("run_listener.py")
+    if args.command == "setup":
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            print("zero setup requires an interactive TTY; use `zero tui --print --panel setup` to inspect state.", file=sys.stderr)
+            return 2
+        import curses
+        from .tui import run_setup_wizard
+
+        config_path = args.config or canonical_config_path()
+        panel_path = args.panel_db or (zero_home() / "panel.db")
+        try:
+            return curses.wrapper(lambda stdscr: 0 if run_setup_wizard(
+                stdscr,
+                config_path=config_path,
+                panel_path=panel_path,
+            ) else 1)
+        except curses.error as exc:
+            print(f"zero setup: terminal initialization failed: {exc}", file=sys.stderr)
+            return 1
     if args.command == "tui":
         from .tui import main as tui_main
         tui_args = []
@@ -148,8 +173,12 @@ def main(argv: list[str] | None = None) -> int:
             tui_args.extend(["--store", str(args.store)])
         if getattr(args, "config", None):
             tui_args.extend(["--config", str(args.config)])
+        if getattr(args, "runtime_config", None):
+            tui_args.extend(["--runtime-config", str(args.runtime_config)])
         if getattr(args, "tail", None):
             tui_args.extend(["--tail", str(args.tail)])
+        if getattr(args, "no_animation", False):
+            tui_args.append("--no-animation")
         return tui_main(tui_args)
     if args.command == "config" and args.config_command == "show":
         print(json.dumps(ConfigStore(args.path).load().model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))

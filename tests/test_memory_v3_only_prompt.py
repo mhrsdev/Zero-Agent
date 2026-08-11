@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import pytest
 
 from zero.brain import ZeroBrain
@@ -23,7 +24,7 @@ class Router:
 async def test_normal_prompt_memory_uses_v3_without_legacy_composer(tmp_path, monkeypatch):
     monkeypatch.setenv("ZERO_MEMORY_V2_ENABLED", "false")
     monkeypatch.setenv("ZERO_MEMORY_V2_SHADOW", "false")
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     cfg = cfg.model_copy(update={"memory": cfg.memory.model_copy(update={"db_path": str(tmp_path / "legacy.db")})})
     store = ZeroStore(cfg.memory.db_path)
     router = Router()

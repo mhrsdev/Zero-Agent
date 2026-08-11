@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from zero.brain import ZeroBrain, sticker_context_allowed, user_requests_sticker, sticker_retry_feedback
-from zero.config import ZeroConfig
+from zero.config import StickersConfig, ZeroConfig
 from zero.storage import ZeroStore
 from zero.stickers.observer import StickerObserver
 
@@ -23,11 +23,11 @@ def test_sticker_context_policy_blocks_technical_and_allows_clear_joke():
 
 
 def test_sticker_runtime_defaults_are_conservative():
-    cfg = ZeroConfig.load('/root/zero/config/zero.yaml').stickers
+    cfg = StickersConfig()
     assert cfg.auto_enabled is True
-    assert cfg.chance_percent == 100
-    assert cfg.limit_per_hour == 10
-    assert cfg.cooldown_seconds == 120
+    assert cfg.chance_percent == 10
+    assert cfg.limit_per_hour == 2
+    assert cfg.cooldown_seconds == 600
     assert cfg.min_messages_between == 5
     assert cfg.repeat_window == 20
 
@@ -50,7 +50,7 @@ async def test_direct_sticker_request_sends_without_llm_marker():
     brain=object.__new__(ZeroBrain)
     brain.config=SimpleNamespace(stickers=SimpleNamespace(enabled=True))
     sent=[]
-    async def fake_send(chat_id,mood,direct_request=False): sent.append((chat_id,mood,direct_request))
+    async def fake_send(chat_id,mood,direct_request=False,**_kwargs): sent.append((chat_id,mood,direct_request))
     brain._send_sticker_async=fake_send
     result=await brain._maybe_reply_with_sticker('چشم قربان',-1001,'استیکرشو بفرست')
     await asyncio.sleep(0)

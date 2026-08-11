@@ -40,7 +40,7 @@ def decide_reply(message: IncomingMessage, triggered: bool, should_interject: bo
     if spam_blocked:
         return Decision(False, "spam_blocked")
     if triggered:
-        return Decision(True, "triggered")
+        return Decision(True, "triggered", continue_generation=True)
     if should_interject:
-        return Decision(True, "interject", interject=True)
+        return Decision(True, "interject", interject=True, continue_generation=True)
     return Decision(False, "no_need")

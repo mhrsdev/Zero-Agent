@@ -21,6 +21,7 @@ no patches, no mocks for security primitives.  Fakes are confined to bot/router
 inputs only.
 """
 from __future__ import annotations
+from conftest import PANEL_DIR
 
 import re
 from pathlib import Path
@@ -139,7 +140,7 @@ async def panel(tmp_path):
         store,
         FakeRouter(),
         bot,
-        static_dir="/root/zero/panel",
+        static_dir=str(PANEL_DIR),
         services={
             "knowledge": FakeKnowledge(),
             "jobs": FakeJobs(),

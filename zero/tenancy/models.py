@@ -69,7 +69,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.OWNER: _OWNER,
 }
 
-_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 #: Identifiers that must never be used as fallback owners. Using any of these
 #: as an installation_id or group_id would create a fail-open path that

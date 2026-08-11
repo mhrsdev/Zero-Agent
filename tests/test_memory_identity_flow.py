@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import pytest
 
 from zero.brain import ZeroBrain
@@ -69,7 +70,7 @@ async def test_reply_chain_stops_on_cycle_and_depth_cap(tmp_path):
 
 @pytest.mark.asyncio
 async def test_brain_persists_message_envelope_and_zero_reply_identity(tmp_path):
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / "memory.db"))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
     brain.zero_user_id = 999
@@ -94,7 +95,7 @@ async def test_brain_persists_message_envelope_and_zero_reply_identity(tmp_path)
 
 @pytest.mark.asyncio
 async def test_profile_metadata_refreshes_even_for_untrusted_control_text(tmp_path):
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / "memory.db"))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
     message = IncomingMessage(
@@ -112,7 +113,7 @@ async def test_profile_metadata_refreshes_even_for_untrusted_control_text(tmp_pa
 
 @pytest.mark.asyncio
 async def test_bot_message_is_archive_only_and_never_creates_human_memory(tmp_path):
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / "memory.db"))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
     bot = IncomingMessage(

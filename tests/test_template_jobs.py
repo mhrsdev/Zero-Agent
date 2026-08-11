@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import asyncio
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from zero.template_jobs import JobSecurityError, TemplateJobService, _next_run, 
 
 
 def service(tmp_path: Path):
-    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    config = ZeroConfig.load(CONFIG_EXAMPLE)
     config = config.model_copy(update={'owner_user_id': 1, 'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'jobs.db')})})
     return TemplateJobService(ZeroStore(config.memory.db_path), config)
 
@@ -65,7 +66,7 @@ def test_group_summary_uses_semantic_builder_for_last_24_hours(monkeypatch, tmp_
         monkeypatch.setattr('zero.template_jobs._now', lambda: 200_000)
         jobs = TemplateJobService(
             ZeroStore(str(tmp_path / 'summary.db')),
-            ZeroConfig.load('/root/zero/config/zero.example.yaml'),
+            ZeroConfig.load(CONFIG_EXAMPLE),
             summary_builder=semantic_builder,
         )
         out = await jobs._execute_template({
@@ -91,7 +92,7 @@ def test_group_summary_does_not_cut_semantic_output_at_1000_chars(tmp_path):
     async def scenario():
         jobs = TemplateJobService(
             ZeroStore(str(tmp_path / 'long-summary.db')),
-            ZeroConfig.load('/root/zero/config/zero.example.yaml'),
+            ZeroConfig.load(CONFIG_EXAMPLE),
             summary_builder=builder,
         )
         out = await jobs._execute_template({'template_id': 'group_summary', 'input_json': '{}', 'chat_id': -100})
@@ -109,7 +110,7 @@ def test_group_summary_provider_failure_never_dumps_raw_messages(tmp_path):
     async def scenario():
         jobs = TemplateJobService(
             ZeroStore(str(tmp_path / 'failed-summary.db')),
-            ZeroConfig.load('/root/zero/config/zero.example.yaml'),
+            ZeroConfig.load(CONFIG_EXAMPLE),
             summary_builder=failing_builder,
         )
         out = await jobs._execute_template({
@@ -159,7 +160,7 @@ def test_daily_summary_prompt_uses_window_and_includes_bot_messages(tmp_path):
             return RouteResult(text='خلاصه معنایی ساخته شد.', provider='test', model='test', attempts=1)
 
     async def scenario():
-        config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+        config = ZeroConfig.load(CONFIG_EXAMPLE)
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'brain-summary.db')})})
         store = ZeroStore(config.memory.db_path, recent_messages_limit=20)
         async with store._lock:

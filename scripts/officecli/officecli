@@ -1,4 +1,4 @@
-#!/usr/local/lib/hermes-agent/venv/bin/python3
+#!/usr/bin/env python3
 """officecli — Office document creation/editing/rendering CLI.
 
 A minimal but real implementation of the officecli contract:

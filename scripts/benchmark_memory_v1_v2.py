@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import asyncio,json,statistics,sys,tempfile,time
+import asyncio,json,os,statistics,sys,tempfile,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
@@ -17,7 +17,7 @@ def score(cases,mode):
   with tempfile.TemporaryDirectory() as td:
    if mode=='v2':
     s=MemoryV2Service(str(Path(td)/'v2.db'))
-    for x in r.get('stored_memories',[]):await s.put(MemoryItem(x['id'],'episode',x.get('scope','group_user'),x['content'],x['content'].casefold(),uid,chat,group_id=chat,subject='participants',predicate=x.get('category','event'),topics=(x.get('category','event'),),importance=1,confidence=1))
+    for x in r.get('stored_memories',[]):await s.put(MemoryItem(x['id'],'episode',x.get('scope','group_user'),x['content'],x['content'].casefold(),uid,chat,group_id=chat,subject=x['id'],predicate='benchmark',topics=(x.get('category','event'),),importance=1,confidence=1))
     block,meta=await s.context(m);got=set(meta.get('ids',[]));tok=meta['tokens']
    else:
     st=ZeroStore(str(Path(td)/'v1.db'));sem=SemanticUserMemory(st.db_path)
@@ -28,10 +28,24 @@ def score(cases,mode):
  p=tp/(tp+fp) if tp+fp else 1;rec=tp/(tp+fn) if tp+fn else 1
  return {'precision':p,'recall':rec,'f1':2*p*rec/(p+rec) if p+rec else 0,'forbidden_hit_rate':forbid/len(cases),'no_memory_accuracy':no_ok/sum(bool(x.get('expected_no_memory') or not x.get('expected_relevant_memory_ids')) for x in cases),'median_items':statistics.median(items),'p95_items':pct(items,.95),'median_tokens':statistics.median(tokens),'p95_tokens':pct(tokens,.95),'median_latency_ms':statistics.median(lat),'p95_latency_ms':pct(lat,.95)}
 def main():
- for name,path in [('synthetic','tests/fixtures/memory_v2/regression_corpus.jsonl'),('real','tests/fixtures/memory_v2/real_anonymized_corpus.jsonl')]:
-  cases=[json.loads(x) for x in Path(path).read_text().splitlines()]
-  if name=='real':
-   dev=[r for i,r in enumerate(cases) if i%3]; holdout=[r for i,r in enumerate(cases) if not i%3]
-   for split,part in [('development',dev),('holdout',holdout)]:print(json.dumps({'corpus':name,'split':split,'cases':len(part),'preliminary':len(part)<30,'v1':score(part,'v1'),'v2':score(part,'v2')},ensure_ascii=False))
-  else:print(json.dumps({'corpus':name,'cases':len(cases),'preliminary':False,'v1':score(cases,'v1'),'v2':score(cases,'v2')},ensure_ascii=False))
-if __name__=='__main__':main()
+ synthetic_path=Path('tests/fixtures/memory_v2/regression_corpus.jsonl')
+ cases=[json.loads(x) for x in synthetic_path.read_text().splitlines()]
+ v1=score(cases,'v1');v2=score(cases,'v2')
+ gates={
+  'precision_at_least_0_95':v2['precision']>=.95,
+  'recall_at_least_0_95':v2['recall']>=.95,
+  'forbidden_hit_rate_zero':v2['forbidden_hit_rate']==0,
+  'no_memory_accuracy_one':v2['no_memory_accuracy']==1,
+ }
+ gates['passed']=all(gates.values())
+ print(json.dumps({'corpus':'synthetic','corpus_kind':'synthetic','cases':len(cases),'preliminary':False,'v1':v1,'v2':v2,'gates':gates},ensure_ascii=False))
+ real_path=Path(os.getenv('ZERO_REAL_MEMORY_CORPUS','tests/fixtures/memory_v2/real_anonymized_corpus.jsonl'))
+ if not real_path.is_file():
+  print(json.dumps({'corpus':'real','status':'BLOCKED','reason':'real_anonymized_corpus_missing','semantic_review':'REQUIRED'},ensure_ascii=False))
+  return 0 if gates['passed'] else 1
+ real_cases=[json.loads(x) for x in real_path.read_text().splitlines()]
+ dev=[r for i,r in enumerate(real_cases) if i%3];holdout=[r for i,r in enumerate(real_cases) if not i%3]
+ for split,part in [('development',dev),('holdout',holdout)]:
+  print(json.dumps({'corpus':'real','split':split,'cases':len(part),'preliminary':len(part)<30,'v1':score(part,'v1'),'v2':score(part,'v2')},ensure_ascii=False))
+ return 0 if gates['passed'] else 1
+if __name__=='__main__': raise SystemExit(main())

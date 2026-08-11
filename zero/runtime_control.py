@@ -3,14 +3,17 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
-PID_DIR = Path('/root/zero/runtime/pids')
+from .paths import repo_path, zero_home_path
+
+PID_DIR = zero_home_path("pids")
 PID_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(PID_DIR, 0o700)
-LISTENER_PID = PID_DIR / 'listener.pid'
-_LISTENER_SCRIPT = '/root/zero/scripts/run_listener.py'
-_LISTENER_PYTHON = '/root/zero/.venv/bin/python'
+LISTENER_PID = PID_DIR / "listener.pid"
+_LISTENER_SCRIPT = str(repo_path("scripts", "run_listener.py"))
+_LISTENER_PYTHON = os.environ.get("ZERO_PYTHON") or sys.executable
 
 
 def _read_pid(path: Path) -> int | None:

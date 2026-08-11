@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
@@ -87,7 +88,7 @@ def test_semantic_concurrent_pending_candidates_merge_evidence(tmp_path):
 
 @pytest.mark.asyncio
 async def test_semantic_monthly_summary_replaces_deterministic_fallback(tmp_path, monkeypatch):
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / "memory.db"))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
 
@@ -108,7 +109,7 @@ async def test_semantic_monthly_summary_replaces_deterministic_fallback(tmp_path
 
 @pytest.mark.asyncio
 async def test_summary_rejects_fallback_provider_even_if_text_looks_valid(tmp_path):
-    cfg = ZeroConfig.load("/root/zero/config/zero.example.yaml")
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / "memory.db"))
     await store.append_recent(-1, 1, "u", "user", "پیام گروه")
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))

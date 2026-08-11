@@ -41,6 +41,7 @@ def test_dry_run_is_one_topic_and_does_not_store(tmp_path: Path):
 
 def test_production_dedup_and_retrieval_are_separate_from_memory(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(knowledge, "_memory_available_ok", lambda: True)
+    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
     async def scenario():
         store = ZeroStore(str(tmp_path / 'zero.db'))
         worker = KnowledgeWorker(store, FakeWeb(), FakeRouter())
@@ -112,4 +113,18 @@ def test_web_candidate_queue_dedup_restart_and_nightly_batch(tmp_path: Path):
         result = await worker.process_web_candidates('run', 'trace', budget=1)
         assert result == {'calls': 1, 'accepted': 1, 'rejected': 0}
         assert (await store.web_knowledge_queue_status())['processed'] == 1
+    asyncio.run(scenario())
+
+
+def test_resource_pressure_skip_keeps_stable_result_schema(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(knowledge, "_memory_available_ok", lambda: True)
+    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (10**6, 0.0, 0.0))
+    async def scenario():
+        store = ZeroStore(str(tmp_path / "zero.db"))
+        result = await KnowledgeWorker(store, FakeWeb(), FakeRouter()).run_nightly(topic_limit=1)
+        assert result["status"] == "SKIPPED_RESOURCE_PRESSURE"
+        assert result["reason"] == "resource_pressure"
+        assert result["accepted_count"] == result["rejected_count"] == 0
+        assert result["topics"] == result["llm_calls_used"] == 0
+        assert result["run_id"].startswith("krun_")
     asyncio.run(scenario())

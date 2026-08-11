@@ -1,3 +1,4 @@
+from conftest import CONFIG_RUNTIME
 from zero.web import build_search_query, needs_web_search, is_deep_search_request
 from zero.brain import build_live_market_disclosure, deterministic_market_tool_calls, is_telegram_search_request, is_media_followup_text, parse_search_command, reply_token_limit
 from zero.config import ZeroConfig
@@ -165,7 +166,7 @@ def test_media_followup_intent_is_narrow():
 
 
 def test_live_web_context_does_not_instruct_unavailable_reply():
-    config = ZeroConfig.load('/root/zero/config/zero.yaml')
+    config = ZeroConfig.load(CONFIG_RUNTIME)
     prompt = build_reply_prompt(
         config, mode='normal', sender_label='@u', user_text='قیمت اتریوم چنده؟',
         reply_text='', recent=[], group_summary='',
@@ -177,7 +178,7 @@ def test_live_web_context_does_not_instruct_unavailable_reply():
 
 
 def test_deep_prompt_isolates_private_memory_and_delimits_web_evidence():
-    config = ZeroConfig.load('/root/zero/config/zero.yaml')
+    config = ZeroConfig.load(CONFIG_RUNTIME)
     prompt = build_reply_prompt(
         config, mode='normal', sender_label='@u', user_text='/deepsearch Kimi 3',
         reply_text='', recent=[], group_summary='', deep_research=True,

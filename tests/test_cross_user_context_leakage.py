@@ -1,3 +1,4 @@
+from conftest import CONFIG_EXAMPLE
 import pytest
 
 from zero.memory import build_group_summary
@@ -21,7 +22,7 @@ async def test_layered_user_memory_does_not_leak_between_same_name_users(tmp_pat
 
 
 def test_prompt_has_canonical_sender_identity_and_does_not_use_label_as_key():
-    cfg = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     prompt = build_reply_prompt(
         cfg, mode='default', sender_label='Ali', chat_id=-1001, sender_id=222,
         user_text='سلام', reply_text='', recent=[
@@ -35,7 +36,7 @@ def test_prompt_has_canonical_sender_identity_and_does_not_use_label_as_key():
 
 
 def test_prompt_keeps_reply_target_identity_separate_from_current_sender():
-    cfg = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     prompt = build_reply_prompt(
         cfg, mode='default', sender_label='YSN RFD', chat_id=-1001, sender_id=222, message_id=88,
         user_text='زیرو جواب بده', reply_text='این متن متعلق به Loaded است',
@@ -52,7 +53,7 @@ def test_prompt_keeps_reply_target_identity_separate_from_current_sender():
 
 
 def test_prompt_separates_personal_memory_from_group_context_and_hardens_identity():
-    cfg = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     prompt = build_reply_prompt(
         cfg, mode='default', sender_label='@owner', chat_id=-1001, sender_id=708,
         user_text='سلام', reply_text='', recent=[
@@ -72,7 +73,7 @@ async def test_remember_reply_records_zero_as_assistant_sender(tmp_path):
     from zero.models import IncomingMessage
     from zero.router import IndependentRouter
 
-    cfg = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    cfg = ZeroConfig.load(CONFIG_EXAMPLE)
     store = ZeroStore(str(tmp_path / 'reply.db'))
     brain = ZeroBrain(cfg, store, IndependentRouter(cfg))
     brain.zero_user_id = 999

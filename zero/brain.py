@@ -52,6 +52,9 @@ from .web import HybridWeb, build_search_query, is_current_price_or_market_query
 from .web_search.truth import build_news_fallback, build_numeric_fallback, numeric_fallback_eligible, sanitize_source_display, source_link
 from .vision import VisionProcessor, is_image_media, is_gif_media, is_video_media, is_sticker_media
 from .stickers.observer import StickerObserver
+from .stickers.decision import CANONICAL_MOODS, StickerIntent, StickerSendOutcome, normalize_mood
+from .gifs.decision import GifSendOutcome
+from .gifs.service import GifService
 
 logger = logging.getLogger('zero.brain')
 
@@ -100,9 +103,7 @@ def deterministic_market_tool_calls(text: str) -> list[dict]:
     return calls
 
 
-_VALID_MOODS = frozenset(['funny', 'sad', 'love', 'angry', 'greeting', 'react',
-                          'cool', 'shock', 'surprise', 'thinking', 'approve', 'fire',
-                          'celebrate', 'pray', 'smirk', 'dead'])
+_VALID_MOODS = CANONICAL_MOODS
 _STICKER_WORDS_FA = ('استیکر', 'sticker', 'sticer')
 _STICKER_WORDS_EN = ('sticker',)
 _INTERNAL_SEARCH_STATUS_RE = re.compile(r'(?im)^\s*(?:WEB_STATUS|TG_STATUS|GOOGLE_GROUNDING_STATUS)\s*:\s*[^\r\n]*\r?\n?')
@@ -145,12 +146,7 @@ def build_live_market_disclosure(title: str, url: str, searched_at_utc: str) -> 
 
 
 def sanitize_mood(mood: str) -> str | None:
-    m = (mood or '').lower().strip()
-    if m == 'reaction':
-        return 'react'
-    if m in _VALID_MOODS:
-        return m
-    return 'react'  # safe fallback
+    return normalize_mood(mood, default="react")
 
 
 def sanitize_outgoing_text(text: str) -> tuple[str, str | None]:
@@ -196,6 +192,27 @@ def user_requests_sticker(user_text: str) -> bool:
     return bool(re.search(r'(^|\s)استیکر(ها)?(\s|$)',low) and any(v in low for v in ('بفرست','بده','بذار','بزن','میخوام','می‌خوام','دیگه')))
 
 
+def user_requests_gif(user_text: str) -> bool:
+    low = normalize_sticker_text(user_text)
+    if not low:
+        return False
+    has_gif = bool(re.search(r"(?:^|\s)(?:گیف|gif)(?:\s|$)", low))
+    if not has_gif:
+        return False
+    verbs = (
+        "بفرست", "بده", "بذار", "بزن", "میخوام", "می‌خوام", "دیگه",
+        "send", "please", "another", "want",
+    )
+    return any(verb in low for verb in verbs) or low in {"گیف", "gif"}
+
+
+def gif_negative_feedback(user_text: str) -> bool:
+    low = normalize_sticker_text(user_text)
+    return any(phrase in low for phrase in (
+        "گیف نده", "گیف نفرست", "gif نده", "gif نفرست", "بس کن گیف", "اسپم نکن",
+    ))
+
+
 def sticker_negative_feedback(user_text: str) -> bool:
     low=normalize_sticker_text(user_text)
     return any(p in low for p in ('بس کن','استیکر نده','اسپم نکن','ساکت','کمتر استیکر بفرست'))
@@ -218,19 +235,24 @@ def sticker_context_allowed(user_text: str, *, direct_request: bool = False) -> 
 
 
 def detect_mood_from_user(user_text: str) -> str:
-    low = (user_text or '').lower()
-    if any(w in low for w in ('خنده', 'باحال', 'بامزه', 'funny', 'خنده‌دار', 'میخند')):
-        return 'funny'
-    if any(w in low for w in ('ناراحت', 'غم', 'گریه', 'sad', 'غمگین')):
-        return 'sad'
-    if any(w in low for w in ('عشق', 'دوست', 'قلب', 'love', '❤️')):
-        return 'love'
-    if any(w in low for w in ('عصبانی', 'angry', 'قهر', 'اعصاب')):
-        return 'angry'
-    if any(w in low for w in ('سلام', 'خداحافظ', 'greeting', 'hello', 'bye', 'hi')):
-        return 'greeting'
-    if any(w in low for w in ('تعجب', 'شگفت', 'wow', 'عجب')):
-        return 'shock'
+    low = normalize_sticker_text(user_text)
+    mood_terms = (
+        ('celebrate', ('تولد', 'جشن', 'تبریک', 'مبارک', 'party', 'celebrate')),
+        ('funny', ('خنده', 'باحال', 'بامزه', 'funny', 'خنده دار', 'میخند')),
+        ('sad', ('ناراحت', 'غم', 'گریه', 'sad', 'غمگین')),
+        ('love', ('عشق', 'دوستت', 'قلب', 'love', '❤️')),
+        ('angry', ('عصبانی', 'angry', 'قهر', 'اعصاب')),
+        ('greeting', ('سلام', 'خداحافظ', 'greeting', 'hello', 'bye', ' hi')),
+        ('shock', ('تعجب', 'شگفت', 'wow', 'عجب', 'شوکه')),
+        ('approve', ('تایید', 'قبول', 'اوکی', 'آفرین', 'approve')),
+        ('disapprove', ('رد', 'مخالف', 'نپسند', 'disapprove')),
+        ('thinking', ('فکر', 'متفکر', 'thinking')),
+        ('pray', ('دعا', 'الهی', 'pray')),
+        ('cool', ('خفن', 'کول', 'cool')),
+    )
+    for mood, terms in mood_terms:
+        if any(term in low for term in terms):
+            return mood
     return 'react'
 
 
@@ -249,7 +271,7 @@ def is_media_followup_text(text: str) -> bool:
 
 
 class ZeroBrain:
-    def __init__(self, config: ZeroConfig, store: ZeroStore, router: IndependentRouter, client=None, knowledge=None):
+    def __init__(self, config: ZeroConfig, store: ZeroStore, router: IndependentRouter, client=None, knowledge=None, sticker_rng=None, gif_rng=None):
         self.config = config
         self.store = store
         self.router = router
@@ -272,7 +294,8 @@ class ZeroBrain:
         # V1 is migration/archive-only. Normal runtime retrieval and writes are V3-only.
         self.v1_memory_runtime_enabled = False
         self.web = HybridWeb(config, store)
-        vision_keys = getattr(router, 'gemini_keys', getattr(router, 'keys', []))
+        # Direct Gemini Vision must never consume an aggregate cross-provider key pool.
+        vision_keys = list(getattr(router, "gemini_keys", []) or [])
         self.vision = VisionProcessor(config, vision_keys, store)
         self.sticker_observer = StickerObserver(config, store, client=client, vision=self.vision)
         self.limit_challenges = LimitChallengeService(store)
@@ -284,71 +307,245 @@ class ZeroBrain:
         # (create_task may race with a slow _send_sticker_async).
         self._turn_sticker_marker = set()  # mood strings queued this turn
         self._sticker_send_lock = asyncio.Lock()
+        self._sticker_rng = sticker_rng or random.Random()
+        self._gif_send_lock = asyncio.Lock()
+        self._gif_rng = gif_rng or random.Random()
 
     # ------------------------------------------------------------------
     # STICKER SENDING
     # ------------------------------------------------------------------
-    async def _send_sticker_async(self, chat_id: int, mood: str, direct_request: bool = False) -> None:
+    async def _send_sticker_async(
+        self,
+        chat_id: int,
+        mood: str,
+        direct_request: bool = False,
+        retry_request: bool = False,
+    ) -> StickerSendOutcome:
         async with self._sticker_send_lock:
-            await self._send_sticker_once(chat_id, mood, direct_request)
+            return await self._send_sticker_once(chat_id, mood, direct_request, retry_request)
 
-    async def _send_sticker_once(self, chat_id: int, mood: str, direct_request: bool = False) -> None:
+    async def _send_sticker_once(
+        self,
+        chat_id: int,
+        mood: str,
+        direct_request: bool = False,
+        retry_request: bool = False,
+    ) -> StickerSendOutcome:
+        canonical_mood = normalize_mood(mood, default="react") or "react"
+        intent = StickerIntent(
+            mood=canonical_mood,
+            direct_request=direct_request,
+            retry_request=retry_request,
+            allow_generic_fallback=direct_request and canonical_mood == "react",
+        )
+
+        candidate_count = 0
+        send_probability = 1.0
+        random_sample: float | None = None
+        confidence_threshold = 0.0
+
+        def finish(
+            reason: str,
+            *,
+            candidate_id: int | None = None,
+            relevance_score: float = 0.0,
+            fallback_level: str = "none",
+            transport: str = "not_attempted",
+        ) -> StickerSendOutcome:
+            outcome = StickerSendOutcome(
+                reason=reason,
+                mood=canonical_mood,
+                direct_request=direct_request,
+                candidate_id=candidate_id,
+                relevance_score=relevance_score,
+                fallback_level=fallback_level,
+                transport=transport,
+                candidate_count=candidate_count,
+                send_probability=send_probability,
+                random_sample=random_sample,
+                confidence_threshold=confidence_threshold,
+            )
+            logger.info(
+                "STICKER_DECISION chat_id=%s mood=%s direct=%s reason=%s "
+                "candidate_id=%s candidates=%s relevance=%.2f threshold=%.2f "
+                "probability=%.3f sample=%s fallback=%s transport=%s",
+                chat_id, canonical_mood, direct_request, reason, candidate_id,
+                candidate_count, relevance_score, confidence_threshold,
+                send_probability, random_sample, fallback_level, transport,
+            )
+            return outcome
+
         try:
             cfg = self.config.stickers
-            if not cfg.enabled or (not cfg.auto_enabled and not direct_request):
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=auto_disabled', chat_id)
-                return
-            policy = await self.store.get_sticker_send_policy(chat_id)
+            enabled_raw = await self.store.get_setting("stickers_enabled", "")
+            persisted_disabled = str(enabled_raw).casefold() in {"false", "0", "off"}
+            if not cfg.enabled or persisted_disabled:
+                return finish("disabled")
+            if not cfg.auto_enabled and not direct_request:
+                return finish("auto_disabled")
+
+            trigger_type = "retry" if retry_request else ("direct" if direct_request else "auto")
+            policy = await self.store.get_sticker_send_policy(
+                chat_id, trigger_type=trigger_type
+            )
             now = int(time.time())
-            feedback_raw = await self.store.get_setting(f'sticker_negative_until:{chat_id}', '0')
+            feedback_raw = await self.store.get_setting(
+                f"sticker_negative_until:{chat_id}", "0"
+            )
             feedback_until = int(feedback_raw or 0)
             if not direct_request and feedback_until > now:
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=negative_feedback', chat_id)
-                return
-            if policy['sent_last_hour'] >= cfg.limit_per_hour:
-                logger.info('STICKER_RATE_LIMITED chat_id=%s reason=hourly_limit count=%s', chat_id, policy['sent_last_hour'])
-                return
+                return finish("negative_feedback")
+            hourly_limit = (
+                cfg.direct_limit_per_hour if direct_request else cfg.limit_per_hour
+            )
+            if policy["sent_last_hour"] >= hourly_limit:
+                return finish("hourly_limit")
+            if (direct_request and not retry_request and policy["last_sent_at"]
+                    and now - policy["last_sent_at"] < cfg.direct_cooldown_seconds):
+                return finish("direct_cooldown")
             cooldown = cfg.cooldown_seconds * (2 if feedback_until > now else 1)
-            if not direct_request and policy['last_sent_at'] and now - policy['last_sent_at'] < cooldown:
-                logger.info('STICKER_COOLDOWN_ACTIVE chat_id=%s remaining=%s', chat_id, cooldown - (now - policy['last_sent_at']))
-                return
-            if not direct_request and policy['messages_since_last'] < cfg.min_messages_between:
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=min_messages_between count=%s', chat_id, policy['messages_since_last'])
-                return
+            if (not direct_request and policy["last_sent_at"]
+                    and now - policy["last_sent_at"] < cooldown):
+                return finish("cooldown")
+            if (not direct_request
+                    and policy["messages_since_last"] < cfg.min_messages_between):
+                return finish("min_messages_between")
+            if not direct_request:
+                chance_raw = await self.store.get_setting("stickers_send_chance", "")
+                try:
+                    send_probability = float(chance_raw) if str(chance_raw) != "" else float(cfg.send_chance)
+                except (TypeError, ValueError):
+                    send_probability = float(cfg.send_chance)
+                send_probability = max(0.0, min(1.0, send_probability))
+                rng = getattr(self, "_sticker_rng", random)
+                random_sample = float(rng.random())
+                if random_sample > send_probability:
+                    return finish("chance_rejected")
 
             from .stickers.library import StickerLibrary
             from .stickers.sender import StickerSender
             from .stickers.models import StickerCandidate
 
-            library = StickerLibrary(self.config, self.store, cfg)
-            candidate = await library.get_random_sticker(mood=mood, min_quality=0.45, chat_id=chat_id)
-            if candidate is None and mood != 'react':
-                candidate = await library.get_random_sticker(mood='react', min_quality=0.40, chat_id=chat_id)
+            rng = getattr(self, "_sticker_rng", random)
+            library = StickerLibrary(self.config, self.store, cfg, rng=rng)
+            excluded_doc_ids = (
+                set(await self.store.get_recent_sticker_doc_ids(
+                    chat_id, int(getattr(cfg, "repeat_window", 20))
+                )) if (retry_request or not direct_request) else set()
+            )
+            exact_pool = await library.search(
+                mood=canonical_mood, limit=200, min_quality=0.45
+            )
+            candidate_count = sum(
+                1 for item in exact_pool if item.doc_id not in excluded_doc_ids
+            )
+            if exact_pool and candidate_count == 0 and excluded_doc_ids:
+                return finish("repeat_window")
+            candidate = await library.get_random_sticker(
+                mood=canonical_mood, min_quality=0.45, chat_id=chat_id,
+                exclude_doc_ids=excluded_doc_ids,
+            )
+            relevance_score = (
+                0.70 + 0.30 * float(candidate.quality_score) if candidate else 0.0
+            )
+            confidence_threshold = float(cfg.min_relevance_score)
+            fallback_level = "exact"
+            if candidate is None and intent.allow_generic_fallback:
+                generic_pool = await library.search(mood="", limit=200, min_quality=0.45)
+                candidate_count = sum(
+                    1 for item in generic_pool if item.doc_id not in excluded_doc_ids
+                )
+                candidate = await library.get_random_sticker(
+                    mood="", min_quality=0.45, chat_id=chat_id,
+                    exclude_doc_ids=excluded_doc_ids,
+                )
+                relevance_score = (
+                    0.45 + 0.15 * float(candidate.quality_score) if candidate else 0.0
+                )
+                confidence_threshold = float(cfg.generic_min_relevance_score)
+                fallback_level = "generic_direct"
             if candidate is None:
-                candidate = await library.get_random_sticker(mood='', min_quality=0.40, chat_id=chat_id)
-                if candidate:
-                    logger.info('STICKER_SELECTION_FALLBACK chat_id=%s mood=%s fallback=any_safe', chat_id, mood)
-            if candidate is None:
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=library_empty', chat_id)
-                return
+                return finish("no_relevant_candidate")
+            if relevance_score < confidence_threshold:
+                return finish(
+                    "below_confidence", candidate_id=candidate.doc_id,
+                    relevance_score=relevance_score, fallback_level=fallback_level,
+                )
             if not self._client:
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=no_client', chat_id)
-                return
+                return finish(
+                    "no_client", candidate_id=candidate.doc_id,
+                    relevance_score=relevance_score, fallback_level=fallback_level,
+                )
+
             sender = StickerSender(self.config, self.store, client=self._client)
-            candidate_obj = StickerCandidate(sticker=candidate, score=candidate.quality_score)
+            candidate_obj = StickerCandidate(
+                sticker=candidate,
+                score=candidate.quality_score,
+                match_reason=f"mood:{canonical_mood}",
+                relevance_score=relevance_score,
+                fallback_level=fallback_level,
+            )
             if candidate.is_video and not candidate.stickerset_id and not candidate.stickerset_short_name:
-                ok = await sender.send_media(chat_id, candidate_obj)
+                sent = await sender.send_media(chat_id, candidate_obj)
             else:
-                ok = await sender.send_sticker(chat_id, candidate_obj)
-            if ok:
-                await self.store.add_rate_event(0, 'sticker_sent', chat_id)
-                await self.store.record_sticker_send(candidate.doc_id, chat_id)
-                logger.info('STICKER_AUTO_SENT chat_id=%s mood=%s doc_id=%s direct_request=%s', chat_id, mood, candidate.doc_id, direct_request)
-            else:
+                sent = await sender.send_sticker(chat_id, candidate_obj)
+            if not sent:
                 await self.store.record_sticker_send_failure(candidate.doc_id)
-                logger.warning('STICKER_SEND_FAILED mood=%s doc_id=%d', mood, candidate.doc_id)
-        except Exception as e:
-            logger.warning('STICKER_SEND_EXCEPTION mood=%s err=%s', mood, e)
+                return finish(
+                    "transport_failed", candidate_id=candidate.doc_id,
+                    relevance_score=relevance_score, fallback_level=fallback_level,
+                    transport="failed",
+                )
+
+            await self.store.add_rate_event(0, "sticker_sent", chat_id)
+            await self.store.record_sticker_send(
+                candidate.doc_id, chat_id, trigger_type=trigger_type
+            )
+            return finish(
+                "sent", candidate_id=candidate.doc_id,
+                relevance_score=relevance_score, fallback_level=fallback_level,
+                transport="sent",
+            )
+        except Exception as exc:
+            logger.warning(
+                "STICKER_SEND_EXCEPTION mood=%s error=%s",
+                canonical_mood, type(exc).__name__,
+            )
+            return finish("transport_exception", transport=type(exc).__name__)
+
+    async def _send_gif_async(
+        self,
+        chat_id: int,
+        mood: str,
+        direct_request: bool = False,
+        retry_request: bool = False,
+    ) -> GifSendOutcome:
+        async with self._gif_send_lock:
+            return await self._send_gif_once(
+                chat_id,
+                mood,
+                direct_request=direct_request,
+                retry_request=retry_request,
+            )
+
+    async def _send_gif_once(
+        self,
+        chat_id: int,
+        mood: str,
+        direct_request: bool = False,
+        retry_request: bool = False,
+    ) -> GifSendOutcome:
+        return await GifService(
+            self.config,
+            self.store,
+            self._client,
+            rng=getattr(self, "_gif_rng", None),
+        ).send(
+            chat_id,
+            mood,
+            direct_request=direct_request,
+            retry_request=retry_request,
+        )
 
     async def _has_sticker_for_mood(self, mood: str) -> bool:
         try:
@@ -359,47 +556,97 @@ class ZeroBrain:
             return False
 
     async def _maybe_reply_with_sticker(self, text: str, chat_id: int, user_text: str) -> str:
-        """Apply sanitize_outgoing_text; send sticker if applicable.
-        
-        This is the ONLY function that should touch outgoing reply text.
-        Guarantees: no STICKER:xxx marker leaks.
-        """
+        """Sanitize control markers and route sticker/GIF requests by media type."""
         cleaned, mood = sanitize_outgoing_text(text)
-
         low_user_text = normalize_sticker_text(user_text)
-        direct_request = user_requests_sticker(user_text)
-        retry_request = sticker_retry_feedback(user_text)
+        direct_sticker = user_requests_sticker(user_text)
+        direct_gif = user_requests_gif(user_text)
+        generic_retry = sticker_retry_feedback(user_text)
+        latest_media = None
+        if generic_retry and not (direct_sticker or direct_gif):
+            latest_media = await self.store.get_latest_media_send_type(chat_id)
+            direct_gif = latest_media == "gif"
+            direct_sticker = latest_media == "sticker"
+            logger.info(
+                "MEDIA_RETRY_REQUEST_DETECTED chat_id=%s latest_media=%s",
+                chat_id, latest_media or "none",
+            )
+
+        if gif_negative_feedback(user_text):
+            await self.store.set_setting(
+                f"gif_negative_until:{chat_id}", str(int(time.time()) + 3600)
+            )
+            logger.info("GIF_NEGATIVE_FEEDBACK_APPLIED chat_id=%s", chat_id)
+            return cleaned
+
+        if direct_gif and not direct_sticker:
+            gif_mood = detect_mood_from_user(user_text)
+            outcome = await self._send_gif_async(
+                chat_id,
+                gif_mood,
+                direct_request=True,
+                retry_request=generic_retry,
+            )
+            if outcome.sent:
+                return cleaned or "😉"
+            if outcome.reason in {"no_relevant_candidate", "repeat_window", "below_relevance_threshold"}:
+                return cleaned or "هنوز GIF مرتبطی برای این حال‌وهوا یاد نگرفتم 😅"
+            return cleaned or "فعلاً نتونستم GIF بفرستم 😅"
+
+        direct_request = direct_sticker
+        retry_request = generic_retry and direct_sticker
         if retry_request:
-            direct_request = True
-            logger.info('STICKER_RETRY_REQUEST_DETECTED chat_id=%s', chat_id)
-        reaction_request = (not direct_request) and any(term in low_user_text for term in ('ری‌اکشن','ری اکشن','ریاکشن','واکنش','reaction','react')) and any(term in low_user_text for term in ('بزن','بذار','بده','بفرست','زن','کن','send','add'))
+            logger.info("STICKER_RETRY_REQUEST_DETECTED chat_id=%s", chat_id)
+        reaction_request = (
+            not direct_request
+            and any(term in low_user_text for term in (
+                "ری‌اکشن", "ری اکشن", "ریاکشن", "واکنش", "reaction", "react"
+            ))
+            and any(term in low_user_text for term in (
+                "بزن", "بذار", "بده", "بفرست", "زن", "کن", "send", "add"
+            ))
+        )
         if reaction_request:
-            logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=reaction_request', chat_id)
+            logger.info("STICKER_AUTO_SKIPPED chat_id=%s reason=reaction_request", chat_id)
             return cleaned
 
         if sticker_negative_feedback(user_text):
-            await self.store.set_setting(f'sticker_negative_until:{chat_id}', str(int(time.time()) + 3600))
-            logger.info('STICKER_NEGATIVE_FEEDBACK_APPLIED chat_id=%s', chat_id)
+            await self.store.set_setting(
+                f"sticker_negative_until:{chat_id}", str(int(time.time()) + 3600)
+            )
+            logger.info("STICKER_NEGATIVE_FEEDBACK_APPLIED chat_id=%s", chat_id)
             return cleaned
-        # Deterministic fallback: an explicit request or a correction must not
-        # depend on the LLM emitting STICKER:xxx.
         if direct_request and mood is None:
             mood = detect_mood_from_user(user_text)
-            logger.info('STICKER_DIRECT_REQUEST_DETECTED chat_id=%s mood=%s marker_present=false retry=%s', chat_id, mood, retry_request)
+            logger.info(
+                "STICKER_DIRECT_REQUEST_DETECTED chat_id=%s mood=%s marker_present=false retry=%s",
+                chat_id, mood, retry_request,
+            )
+        outcome = None
         if mood and self.config.stickers.enabled:
             if not direct_request and (not sticker_context_allowed(user_text) or cleaned.strip()):
-                logger.info('STICKER_AUTO_SKIPPED chat_id=%s reason=context_or_text_response', chat_id)
+                logger.info(
+                    "STICKER_AUTO_SKIPPED chat_id=%s reason=context_or_text_response",
+                    chat_id,
+                )
                 return cleaned
-            asyncio.create_task(self._send_sticker_async(chat_id, mood, direct_request=direct_request))
+            outcome = await self._send_sticker_async(
+                chat_id,
+                mood,
+                direct_request=direct_request,
+                retry_request=retry_request,
+            )
 
         if mood and _empty_when_marker_was_present(text, cleaned):
-            # After stripping the marker the text would have been near-empty.
-            # Decide what to actually output.
-            if self.config.stickers.enabled and await self._has_sticker_for_mood(mood):
-                return '😉'  # sticker is coming
-            # Library empty — tell user explicitly, NO raw marker
-            return 'هنوز استیکر مناسبی یاد نگرفتم 😅'
-
+            if outcome is not None and bool(getattr(outcome, "sent", False)):
+                return "😉"
+            if outcome is not None and getattr(outcome, "reason", "") in {
+                "no_relevant_candidate", "repeat_window", "below_relevance_threshold"
+            }:
+                return "هنوز استیکر مناسبی برای این حال‌وهوا یاد نگرفتم 😅"
+            if direct_request:
+                return "فعلاً نتونستم استیکر بفرستم 😅"
+            return cleaned or "😄"
         return cleaned
 
     # ------------------------------------------------------------------
@@ -419,9 +666,14 @@ class ZeroBrain:
         muted = await self._muted_map()
         return int(muted.get(str(sender_id), 0) or 0) > int(time.time())
 
-    async def _should_interject(self, message: IncomingMessage) -> bool:
-        direct_other = bool(re.search(r'(^|\s)@[A-Za-z0-9_]{3,}', message.text or '')) and not message.mention_zero
-        if not self.config.persona.allow_random_interject or message.sender_is_bot or direct_other or (message.reply_text and not message.reply_to_zero):
+    async def _should_interject(self, message: IncomingMessage, social_decision) -> bool:
+        if not self.social_awareness.allows_autonomous_interjection(message, social_decision):
+            return False
+        if not self.config.persona.allow_random_interject:
+            return False
+        if not await self.social_awareness.enabled('curiosity_enabled', True):
+            return False
+        if not await self.social_awareness.allow_action(message.chat_id, 'curiosity', trace_id=message.trace_id or '-'):
             return False
         last = float(await self.store.get_setting(f'last_interject_at:{int(message.chat_id)}', '0') or 0)
         if time.time() - last < self.config.persona.min_interject_gap_seconds:
@@ -460,10 +712,16 @@ class ZeroBrain:
         triggered = is_triggered(message, self.config, self.config.listener.account_username)
         media_followup = await self._media_followup_info(message)
         direct_sticker_request = user_requests_sticker(message.text)
-        retry_sticker_request = sticker_retry_feedback(message.text) and bool(message.reply_to_zero or media_followup)
-        if direct_sticker_request or retry_sticker_request:
+        direct_gif_request = user_requests_gif(message.text)
+        retry_media_request = sticker_retry_feedback(message.text) and bool(message.reply_to_zero or media_followup)
+        if direct_sticker_request or direct_gif_request or retry_media_request:
             triggered = True
-            logger.info('STICKER_INTENT_TRIGGERED trace_id=%s chat_id=%s sender_id=%s direct=%s retry=%s reply_to_zero=%s media_followup=%s', message.trace_id or '-', message.chat_id, message.sender_id, direct_sticker_request, retry_sticker_request, message.reply_to_zero, bool(media_followup))
+            logger.info(
+                "MEDIA_INTENT_TRIGGERED trace_id=%s chat_id=%s sender_id=%s sticker=%s gif=%s retry=%s reply_to_zero=%s media_followup=%s",
+                message.trace_id or "-", message.chat_id, message.sender_id,
+                direct_sticker_request, direct_gif_request, retry_media_request,
+                message.reply_to_zero, bool(media_followup),
+            )
         media_followup_bypass = False
         if is_media_followup_text(message.text):
             if media_followup:
@@ -476,8 +734,8 @@ class ZeroBrain:
                     logger.info('MEDIA_FOLLOWUP_SPAM_BYPASS_DENIED trace_id=%s chat_id=%s sender_id=%s current_message_id=%s media_message_id=%s media_type=%s age_seconds=%s reason=bypass_already_used', message.trace_id or '-', message.chat_id, message.sender_id, message.message_id, media_followup['media_message_id'], media_followup['media_type'], media_followup['age_seconds'])
             else:
                 logger.info('MEDIA_FOLLOWUP_SPAM_BYPASS_DENIED trace_id=%s chat_id=%s sender_id=%s current_message_id=%s media_message_id=%s media_type=%s age_seconds=%s reason=no_recent_same_sender_media', message.trace_id or '-', message.chat_id, message.sender_id, message.message_id, '-', '-', -1)
-        # Only exact search commands can turn Web Search into a trigger.
-        should_interject = (not triggered) and await self._should_interject(message)
+        # Social eligibility is resolved below; randomness never runs before that gate.
+        should_interject = False
         # The challenge exists only at the configured, real rate-limit boundary.
         # Owner and bot safeguards retain their existing bypass/separate policies.
         window_limit_reached = self.config.policy.user_max_replies_per_window > 0 and recent_user_count >= self.config.policy.user_max_replies_per_window
@@ -502,10 +760,10 @@ class ZeroBrain:
             else:
                 return Decision(True, 'user_rate_limit'), 'یه کم صبر کن؛ لیمیت پیام‌هات پر شده.'
         social_decision = await self.social_awareness.decide(message)
-        if social_decision.should_ignore and not triggered and not should_interject and social_decision.emotion not in {'sad', 'conflict'}:
+        if not triggered:
+            should_interject = await self._should_interject(message, social_decision)
+        if social_decision.should_ignore and not triggered and not should_interject:
             return Decision(False, f'social_{social_decision.reason}'), ''
-        if social_decision.should_ask:
-            should_interject = True
         spam_blocked = self.config.policy.anti_spam_enabled and is_spammy(message.text, recent_user_count)
         if message.sender_id == self.config.owner_user_id or bonus_used or media_followup_bypass:
             spam_blocked = False
@@ -537,7 +795,7 @@ class ZeroBrain:
                 count = await self.store.count_rate_events(message.sender_id, 'bot_msg', self.config.policy.bot_msg_window_seconds, message.chat_id)
                 if count >= self.config.policy.bot_msg_limit:
                     return Decision(True, 'bot_msg_limit'), f'یه کم صبر کن، الان {self.config.policy.bot_msg_limit} تا پیام داده بودم، بعداً ادامه میدم 😉'
-        return None, ''
+        return decision, ''
 
     # ------------------------------------------------------------------
     # MAIN REPLY PATH (shared entry for all output paths)
@@ -756,6 +1014,7 @@ class ZeroBrain:
         memory_context, memory_meta = await self.memory.context(
             message,
             target_user_id=target_user_id,
+            identity_lookup=identity_lookup,
         )
         if memory_context and target_kind != 'speaker':
             memory_context = f'Retrieval target: {target_kind}; do not attribute these facts to the current speaker.\n' + memory_context
@@ -975,14 +1234,18 @@ class ZeroBrain:
 
     async def maybe_reply(self, message: IncomingMessage) -> tuple[Decision, str]:
         early_decision, early_text = await self._pre_check(message)
-        if early_decision is not None:
+        if early_decision is not None and not early_decision.continue_generation:
             return early_decision, early_text
         search_command = parse_search_command(message.text)
         if search_command and not search_command[1]:
             command = '/deepsearch' if search_command[0] == 'deep' else '/search'
             return Decision(True, 'search_usage'), f'بعد از {command} موضوع جستجو رو بنویس.'
         intent = classify_intent(message.text, message.reply_text)
-        return await self._handle_no_media(message, early_decision or Decision(True, 'triggered'), intent)
+        return await self._handle_no_media(
+            message,
+            early_decision or Decision(True, 'triggered', continue_generation=True),
+            intent,
+        )
 
     async def maybe_reply_with_media(self, message: IncomingMessage, event) -> tuple[Decision, str]:
         if not self.config.vision.enabled:
@@ -994,7 +1257,7 @@ class ZeroBrain:
         has_video = is_video_media(media_event)
         has_sticker = is_sticker_media(media_event)
 
-        if not (has_image or has_gif or has_sticker) and event.is_reply:
+        if not (has_image or has_gif or has_video or has_sticker) and event.is_reply:
             replied = await event.get_reply_message()
             if replied and (is_image_media(replied) or is_gif_media(replied) or is_video_media(replied) or is_sticker_media(replied)):
                 media_event = replied
@@ -1007,10 +1270,23 @@ class ZeroBrain:
             return await self.maybe_reply(message)
 
         early_decision, early_text = await self._pre_check(message)
-        if early_decision is not None:
+        if early_decision is not None and not early_decision.continue_generation:
             return early_decision, early_text
         clean_user_text = strip_trigger(message.text, self.config.listener.account_username)
-        vision_result = await self.vision.process(media_event, question=clean_user_text)
+        vision_reason = "unavailable"
+        if hasattr(self.vision, "process_outcome"):
+            vision_outcome = await self.vision.process_outcome(
+                media_event, question=clean_user_text
+            )
+            vision_result = vision_outcome.text if vision_outcome.ok else None
+            vision_reason = vision_outcome.reason
+            logger.info(
+                "VISION_DECISION trace_id=%s reason=%s media_mime=%s frames=%s",
+                message.trace_id or "-", vision_reason,
+                vision_outcome.media_type or "unknown", vision_outcome.frame_count,
+            )
+        else:
+            vision_result = await self.vision.process(media_event, question=clean_user_text)
         if vision_result:
             recent = await self.store.get_recent(message.chat_id, limit=100)
             has_link_context = bool(
@@ -1035,7 +1311,7 @@ class ZeroBrain:
             reply_text = await self._generate_and_sanitize(message, prompt, chat_id=message.chat_id)
             return Decision(True, 'vision'), reply_text
 
-        decision = Decision(True, 'vision_unavailable')
+        decision = Decision(True, f"vision_{vision_reason}")
         if has_gif or has_video:
             return decision, 'این GIF/ویدئو رو نتونستم درست بررسی کنم؛ محتوای حدسی نمی‌گم. دوباره بفرست یا یه فریم واضح ازش بفرست.'
         if has_sticker:

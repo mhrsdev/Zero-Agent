@@ -46,6 +46,7 @@ class Decision:
     should_reply: bool
     reason: str
     interject: bool = False
+    continue_generation: bool = False
 
 
 @dataclass(slots=True)

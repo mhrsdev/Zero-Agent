@@ -69,8 +69,82 @@ class TestTUIIsReal:
         assert status["settings"]["telegram_mode"] == "hybrid"
 
 
+class TestTUIController:
+    def test_navigation_wraps_and_resets_scroll(self):
+        from zero.tui import PANEL_NAMES, TUIController
+
+        controller = TUIController(panel_index=len(PANEL_NAMES) - 1, scroll_offset=9)
+        controller.next_panel()
+        assert controller.panel == "status"
+        assert controller.scroll_offset == 0
+        controller.previous_panel()
+        assert controller.panel == PANEL_NAMES[-1]
+
+    def test_scroll_is_clamped_to_content(self):
+        from zero.tui import TUIController
+
+        controller = TUIController()
+        controller.scroll(100, content_lines=30, viewport_lines=10)
+        assert controller.scroll_offset == 20
+        controller.scroll(-100, content_lines=30, viewport_lines=10)
+        assert controller.scroll_offset == 0
+
+
+class TestTUISetupState:
+    def test_setup_state_is_redacted_and_reports_invalid_config(self, tmp_path):
+        from zero.tui import _setup_state
+
+        config = tmp_path / "zero.json"
+        config.write_text('{"installation_id":"x","telegram":{"mode":"bot","bot_token_ref":"telegram.bot_token"}}')
+        state = _setup_state(config, tmp_path / "missing-panel.db")
+        assert state["config_valid"] is True
+        assert state["telegram_configured"] is True
+        assert "bot_token" not in str(state)
+
+    def test_setup_wizard_persists_canonical_state_without_raw_secrets(self, tmp_path, monkeypatch):
+        import zero.tui as tui
+
+        answers = {
+            "Installation id": "test-installation",
+            "Telegram mode (disabled/bot/user_session/hybrid)": "bot",
+            "Bot token reference": "telegram.bot_token",
+        }
+        monkeypatch.setattr(
+            tui,
+            "_curses_prompt",
+            lambda _stdscr, prompt, **kwargs: answers[prompt],
+        )
+        monkeypatch.setattr(tui, "_curses_message", lambda *_args, **_kwargs: None)
+        ok = tui.run_setup_wizard(
+            object(),
+            config_path=tmp_path / "zero.json",
+            panel_path=tmp_path / "panel.db",
+        )
+        assert ok is True
+        from zero.configuration import ConfigStore
+
+        config = ConfigStore(tmp_path / "zero.json").load()
+        assert config.installation_id == "test-installation"
+        assert config.telegram.bot_token_ref == "telegram.bot_token"
+        assert "secret-value" not in (tmp_path / "zero.json").read_text()
+
+        from zero.configuration import ConfigStore, SetupService
+
+        store = ConfigStore(tmp_path / "zero.json")
+        state = SetupService(store).apply_profile(installation_id="community")
+        assert state.config.installation_id == "community"
+        assert "profile" in state.completed_steps
+        assert store.load().installation_id == "community"
+
+
 class TestTUIWiredIntoCLI:
     """The TUI must be reachable as `zero tui`."""
+
+    def test_cli_has_setup_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["setup", "--config", "/tmp/zero.json"])
+        assert args.command == "setup"
+        assert str(args.config) == "/tmp/zero.json"
 
     def test_cli_has_tui_subcommand(self):
         parser = build_parser()
@@ -142,7 +216,7 @@ class TestTUIPanels:
     def test_panels_registry_exists(self):
         from zero.tui import panels, PANEL_NAMES
         assert set(PANEL_NAMES) == set(panels.keys())
-        assert set(panels.keys()) == {"status", "doctor", "groups", "backup", "logs", "setup"}
+        assert set(panels.keys()) == {"status", "doctor", "groups", "backup", "logs", "setup", "chat", "sessions"}
 
     def test_render_dispatches_by_name(self):
         from zero.tui import render, panels
@@ -370,3 +444,73 @@ class TestTUIPanels:
         rc = cli_main(["tui", "--print", "--panel", "doctor"])
         assert rc == 0
 
+
+
+class _TTYStream:
+    def __init__(self, value=True):
+        self.value = value
+
+    def isatty(self):
+        return self.value
+
+
+class _AnimationScreen:
+    def __init__(self, keys=(-1,)):
+        self.keys = iter(keys)
+        self.nodelay_values = []
+        self.frames = []
+
+    def getmaxyx(self):
+        return (24, 80)
+
+    def erase(self):
+        self.frames.append([])
+
+    def addnstr(self, row, col, text, width):
+        self.frames[-1].append((row, col, text[:width]))
+
+    def refresh(self):
+        pass
+
+    def nodelay(self, value):
+        self.nodelay_values.append(value)
+
+    def getch(self):
+        return next(self.keys, -1)
+
+
+def test_startup_animation_policy_is_accessible_and_environment_aware():
+    from zero.tui import _startup_animation_enabled
+
+    assert _startup_animation_enabled(_TTYStream(), _TTYStream(), {}) is True
+    assert _startup_animation_enabled(_TTYStream(False), _TTYStream(), {}) is False
+    assert _startup_animation_enabled(_TTYStream(), _TTYStream(False), {}) is False
+    for env in ({"NO_COLOR": "1"}, {"TERM": "dumb"}, {"CI": "1"}, {"ZERO_TUI_NO_ANIMATION": "1"}):
+        assert _startup_animation_enabled(_TTYStream(), _TTYStream(), env) is False
+
+
+def test_startup_animation_can_be_skipped_without_sleeping():
+    from zero.tui import _startup_animation
+
+    screen = _AnimationScreen(keys=(ord("q"),))
+    sleeps = []
+    _startup_animation(screen, sleep=lambda seconds: sleeps.append(seconds))
+    assert len(screen.frames) == 1
+    assert sleeps == []
+    assert screen.nodelay_values == [True, False]
+
+
+def test_tui_parser_accepts_explicit_animation_opt_out():
+    from zero.tui import build_parser as build_tui_parser
+
+    args = build_tui_parser().parse_args(["--no-animation"])
+    assert args.no_animation is True
+
+
+def test_zero_cli_forwards_animation_opt_out(monkeypatch):
+    import zero.tui as tui
+
+    calls = []
+    monkeypatch.setattr(tui, "main", lambda argv: calls.append(argv) or 0)
+    assert cli_main(["tui", "--no-animation"]) == 0
+    assert "--no-animation" in calls[0]

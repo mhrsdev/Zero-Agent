@@ -26,6 +26,7 @@ from zero.config import ZeroConfig
 from zero.configuration import ConfigStore, SetupService
 from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.logging_utils import setup_logger
+from zero.paths import zero_home
 from zero.management import load_bot_token
 from zero.router import IndependentRouter
 from zero.runtime_control import listener_status, restart_listener, start_listener, stop_listener
@@ -704,7 +705,7 @@ async def main() -> None:
             text = log_path.read_text(encoding='utf-8', errors='ignore').splitlines()[-30:]
             await message.answer('\n'.join(text) or 'log خالیه.')
         elif sub == 'requests':
-            req_path = Path('/root/zero/runtime/logs/requests.log')
+            req_path = zero_home() / "logs" / "requests.log"
             if req_path.exists():
                 text = req_path.read_text(encoding='utf-8', errors='ignore').splitlines()[-30:]
                 await message.answer('\n'.join(text) or 'requests log خالیه.')

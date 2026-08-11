@@ -4,6 +4,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
+from ..paths import zero_home_path
+
 SCOPES={'global','bot','project','private_user','group','group_user','session','task'}
 STATUSES={'active','superseded','disputed','expired','deleted'}
 SECRET=re.compile(r'(?:\b\d{6,12}:[A-Za-z0-9_-]{20,}\b|\bBearer\s+[A-Za-z0-9._-]+|\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?i:\b(?:password|token|api[_ -]?key|session(?:_string)?)\s*[:=]\s*\S+)|\b(?:postgres|mysql)://[^\s:@]+:[^\s@]+@)')
@@ -19,7 +21,7 @@ class MemoryItem:
 class MemoryV2Service:
     """Local-only V2 store. All failures are isolated from response generation."""
     def __init__(self, path:str|None=None):
-        self.path=Path(path or os.getenv('ZERO_MEMORY_V2_DB','/root/zero/runtime/state/zero-memory-v2.db'))
+        self.path=Path(path or os.getenv('ZERO_MEMORY_V2_DB', str(zero_home_path('state', 'zero-memory-v2.db'))))
         self.enabled=os.getenv('ZERO_MEMORY_V2_ENABLED','false').lower()=='true'; self.shadow=os.getenv('ZERO_MEMORY_V2_SHADOW','true').lower()=='true'
         self.read_enabled=os.getenv('ZERO_MEMORY_V2_READ_ENABLED','true').lower()=='true'; self.write_enabled=os.getenv('ZERO_MEMORY_V2_WRITE_ENABLED','true').lower()=='true'
         self.max_items=int(os.getenv('ZERO_MEMORY_V2_MAX_ITEMS','5')); self.max_tokens=int(os.getenv('ZERO_MEMORY_V2_MAX_TOKENS','700')); self.min_rel=float(os.getenv('ZERO_MEMORY_V2_MIN_RELEVANCE','0.58'))
@@ -27,7 +29,7 @@ class MemoryV2Service:
         try:self.path.parent.mkdir(parents=True,exist_ok=True); self._migrate()
         except (OSError,sqlite3.DatabaseError,RuntimeError):self.healthy=False
     def _conn(self):
-        c=sqlite3.connect(self.path,timeout=3,isolation_level=None); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA busy_timeout=3000'); c.execute('PRAGMA journal_mode=WAL'); return c
+        c=sqlite3.connect(self.path,timeout=30,isolation_level=None); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA busy_timeout=30000'); c.execute('PRAGMA journal_mode=WAL'); return c
     def _migrate(self):
         c=self._conn()
         try:
@@ -54,7 +56,9 @@ class MemoryV2Service:
                 for r in prior:c.execute('UPDATE memory_v2_items SET status="superseded",updated_at=? WHERE id=?',(now,r['id']))
             iid=item.id or str(uuid.uuid4()); c.execute('INSERT INTO memory_v2_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(iid,item.memory_type,item.scope,item.user_id,item.chat_id,item.group_id,item.project_id,item.session_id,item.task_id,item.content,norm,item.subject,item.predicate,item.object,json.dumps(item.topics),json.dumps(item.entities),item.importance,item.confidence,item.created_at or now,now,None,0,item.expires_at,item.status,item.supersedes_id,json.dumps(item.source_message_ids),item.source_type,json.dumps(item.metadata or {})))
             c.execute('INSERT INTO memory_v2_fts(id,content,subjects) VALUES(?,?,?)',(iid,item.content,' '.join(x for x in (item.subject,item.predicate,item.object) if x))); c.execute('COMMIT'); return iid
-        except: c.execute('ROLLBACK'); raise
+        except:
+            if c.in_transaction: c.execute('ROLLBACK')
+            raise
         finally:c.close()
     async def put(self,item:MemoryItem)->str:return await asyncio.to_thread(self._put_sync,item)
     def _search_sync(self,text:str,chat_id:int,user_id:int,limit:int,casual:bool, target_user_id:int|None=None, identity_lookup:bool=False):

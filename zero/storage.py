@@ -376,9 +376,18 @@ CREATE TABLE IF NOT EXISTS sticker_send_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id INTEGER NOT NULL,
   doc_id INTEGER NOT NULL,
-  sent_at INTEGER NOT NULL
+  sent_at INTEGER NOT NULL,
+  trigger_type TEXT NOT NULL DEFAULT 'auto'
 );
 CREATE INDEX IF NOT EXISTS idx_sticker_send_history_chat ON sticker_send_history(chat_id, sent_at DESC);
+CREATE TABLE IF NOT EXISTS gif_send_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER NOT NULL,
+  doc_id INTEGER NOT NULL,
+  sent_at INTEGER NOT NULL,
+  trigger_type TEXT NOT NULL DEFAULT 'auto'
+);
+CREATE INDEX IF NOT EXISTS idx_gif_send_history_chat ON gif_send_history(chat_id, sent_at DESC);
 
 CREATE TABLE IF NOT EXISTS sticker_sets (
   set_id INTEGER PRIMARY KEY,
@@ -583,8 +592,10 @@ class ZeroStore:
         self.db_path = Path(db_path)
         self.recent_messages_limit = max(1, int(recent_messages_limit))
         self.long_term_limit = max(1, int(long_term_limit))
+        parent_preexisted = self.db_path.parent.exists()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.db_path.parent, 0o700)
+        if not parent_preexisted or self.db_path.parent.stat().st_uid == os.geteuid():
+            os.chmod(self.db_path.parent, 0o700)
         self._restrict_db_permissions()
         self._lock = asyncio.Lock()
         self._init_db()
@@ -633,6 +644,12 @@ class ZeroStore:
             }.items():
                 if name not in columns:
                     conn.execute(f'ALTER TABLE stickers ADD COLUMN {name} {definition}')
+            history_columns = {row['name'] for row in conn.execute('PRAGMA table_info(sticker_send_history)')}
+            if 'trigger_type' not in history_columns:
+                conn.execute("ALTER TABLE sticker_send_history ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'auto'")
+            gif_history_columns = {row["name"] for row in conn.execute("PRAGMA table_info(gif_send_history)")}
+            if "trigger_type" not in gif_history_columns:
+                conn.execute("ALTER TABLE gif_send_history ADD COLUMN trigger_type TEXT NOT NULL DEFAULT " + chr(39) + "auto" + chr(39))
             profile_columns = {row['name'] for row in conn.execute('PRAGMA table_info(user_profiles_scoped)')}
             for name, definition in {'username': "TEXT NOT NULL DEFAULT ''", 'display_name': "TEXT NOT NULL DEFAULT ''"}.items():
                 if name not in profile_columns:
@@ -2236,7 +2253,17 @@ class ZeroStore:
                 )
                 conn.commit()
 
-    async def record_sticker_send(self, doc_id: int, chat_id: int, message_id: int | None = None) -> None:
+    async def record_sticker_send(
+        self,
+        doc_id: int,
+        chat_id: int,
+        message_id: int | None = None,
+        *,
+        trigger_type: str = "auto",
+    ) -> None:
+        trigger = (trigger_type or "auto").casefold()
+        if trigger not in {"auto", "direct", "retry"}:
+            raise ValueError(f"invalid sticker trigger_type: {trigger_type}")
         now = int(time.time())
         async with self._lock:
             with self._conn() as conn:
@@ -2244,7 +2271,10 @@ class ZeroStore:
                     'UPDATE stickers SET send_count=send_count+1, last_sent_at=?, message_id=COALESCE(?, message_id), is_available=1 WHERE doc_id=?',
                     (now, message_id, doc_id),
                 )
-                conn.execute('INSERT INTO sticker_send_history(chat_id, doc_id, sent_at) VALUES (?, ?, ?)', (chat_id, doc_id, now))
+                conn.execute(
+                    'INSERT INTO sticker_send_history(chat_id, doc_id, sent_at, trigger_type) VALUES (?, ?, ?, ?)',
+                    (chat_id, doc_id, now, trigger),
+                )
                 conn.commit()
 
     async def record_sticker_send_failure(self, doc_id: int) -> None:
@@ -2259,16 +2289,124 @@ class ZeroStore:
                 rows = conn.execute('SELECT doc_id FROM sticker_send_history WHERE chat_id=? ORDER BY sent_at DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [int(row['doc_id']) for row in rows]
 
-    async def get_sticker_send_policy(self, chat_id: int) -> dict[str, int]:
-        """Return chat-scoped sticker send counters without using labels."""
-        now = int(time.time()); window_cutoff = now - 120
+    async def get_sticker_send_policy(
+        self,
+        chat_id: int,
+        *,
+        trigger_type: str = "auto",
+    ) -> dict[str, int]:
+        """Return independent auto/direct counters over a real one-hour window."""
+        trigger = (trigger_type or "auto").casefold()
+        if trigger in {"direct", "retry"}:
+            predicate = "trigger_type IN ('direct','retry')"
+        elif trigger == "auto":
+            predicate = "trigger_type='auto'"
+        else:
+            raise ValueError(f"invalid sticker trigger_type: {trigger_type}")
+        now = int(time.time())
+        window_cutoff = now - 3600
         async with self._lock:
             with self._conn() as conn:
-                count = int(conn.execute('SELECT COUNT(*) AS c FROM sticker_send_history WHERE chat_id=? AND sent_at>=?', (chat_id, window_cutoff)).fetchone()['c'])
-                last_row = conn.execute('SELECT sent_at FROM sticker_send_history WHERE chat_id=? ORDER BY sent_at DESC LIMIT 1', (chat_id,)).fetchone()
+                count = int(conn.execute(
+                    f'SELECT COUNT(*) AS c FROM sticker_send_history WHERE chat_id=? AND sent_at>=? AND {predicate}',
+                    (chat_id, window_cutoff),
+                ).fetchone()['c'])
+                last_row = conn.execute(
+                    f'SELECT sent_at FROM sticker_send_history WHERE chat_id=? AND {predicate} ORDER BY sent_at DESC LIMIT 1',
+                    (chat_id,),
+                ).fetchone()
                 last = int(last_row['sent_at']) if last_row else 0
-                messages = int(conn.execute("SELECT COUNT(*) AS c FROM recent_messages WHERE chat_id=? AND role='user' AND created_at>=?", (chat_id, last)).fetchone()['c']) if last else 999999
-                return {'sent_last_hour': count, 'last_sent_at': last, 'messages_since_last': messages}
+                messages = int(conn.execute(
+                    "SELECT COUNT(*) AS c FROM recent_messages WHERE chat_id=? AND role='user' AND created_at>=?",
+                    (chat_id, last),
+                ).fetchone()['c']) if last else 999999
+                return {
+                    'sent_last_hour': count,
+                    'last_sent_at': last,
+                    'messages_since_last': messages,
+                }
+
+    async def record_gif_send(
+        self,
+        doc_id: int,
+        chat_id: int,
+        message_id: int | None = None,
+        *,
+        trigger_type: str = "auto",
+    ) -> None:
+        trigger = (trigger_type or "auto").casefold()
+        if trigger not in {"auto", "direct", "retry"}:
+            raise ValueError(f"invalid gif trigger_type: {trigger_type}")
+        now = int(time.time())
+        async with self._lock:
+            with self._conn() as conn:
+                conn.execute(
+                    'UPDATE stickers SET send_count=send_count+1, last_sent_at=?, message_id=COALESCE(?, message_id), is_available=1 WHERE doc_id=?',
+                    (now, message_id, doc_id),
+                )
+                conn.execute(
+                    'INSERT INTO gif_send_history(chat_id, doc_id, sent_at, trigger_type) VALUES (?, ?, ?, ?)',
+                    (chat_id, doc_id, now, trigger),
+                )
+                conn.commit()
+
+    async def get_recent_gif_doc_ids(self, chat_id: int, limit: int = 10) -> list[int]:
+        async with self._lock:
+            with self._conn() as conn:
+                rows = conn.execute(
+                    'SELECT doc_id FROM gif_send_history WHERE chat_id=? ORDER BY sent_at DESC, id DESC LIMIT ?',
+                    (chat_id, limit),
+                ).fetchall()
+                return [int(row['doc_id']) for row in rows]
+
+    async def get_gif_send_policy(
+        self,
+        chat_id: int,
+        *,
+        trigger_type: str = "auto",
+    ) -> dict[str, int]:
+        trigger = (trigger_type or "auto").casefold()
+        if trigger in {"direct", "retry"}:
+            predicate = "trigger_type IN ('direct','retry')"
+        elif trigger == "auto":
+            predicate = "trigger_type='auto'"
+        else:
+            raise ValueError(f"invalid gif trigger_type: {trigger_type}")
+        now = int(time.time())
+        cutoff = now - 3600
+        async with self._lock:
+            with self._conn() as conn:
+                count = int(conn.execute(
+                    f'SELECT COUNT(*) AS c FROM gif_send_history WHERE chat_id=? AND sent_at>=? AND {predicate}',
+                    (chat_id, cutoff),
+                ).fetchone()['c'])
+                last_row = conn.execute(
+                    f'SELECT sent_at FROM gif_send_history WHERE chat_id=? AND {predicate} ORDER BY sent_at DESC, id DESC LIMIT 1',
+                    (chat_id,),
+                ).fetchone()
+                last = int(last_row['sent_at']) if last_row else 0
+                messages = int(conn.execute(
+                    "SELECT COUNT(*) AS c FROM recent_messages WHERE chat_id=? AND role='user' AND created_at>=?",
+                    (chat_id, last),
+                ).fetchone()['c']) if last else 999999
+                return {
+                    'sent_last_hour': count,
+                    'last_sent_at': last,
+                    'messages_since_last': messages,
+                }
+
+    async def get_latest_media_send_type(self, chat_id: int) -> str | None:
+        async with self._lock:
+            with self._conn() as conn:
+                row = conn.execute(
+                    """SELECT media_type FROM (
+                         SELECT sent_at, id, 'sticker' AS media_type FROM sticker_send_history WHERE chat_id=?
+                         UNION ALL
+                         SELECT sent_at, id, 'gif' AS media_type FROM gif_send_history WHERE chat_id=?
+                       ) ORDER BY sent_at DESC, id DESC LIMIT 1""",
+                    (chat_id, chat_id),
+                ).fetchone()
+                return str(row['media_type']) if row else None
 
     async def mark_sticker_saved(self, doc_id: int) -> None:
         now = int(time.time())
@@ -2424,7 +2562,15 @@ class ZeroStore:
             saved_to_account=bool(row['saved_to_account']),
             saved_at=row['saved_at'],
             recent_saved=bool(row['recent_saved']),
-            last_message_id=row['last_message_id']
+            last_message_id=row['last_message_id'],
+            source_chat_id=row['chat_id'],
+            source_message_id=row['message_id'],
+            source_sender_id=row['sender_id'],
+            inferred_mood=row['inferred_mood'],
+            is_available=bool(row['is_available']),
+            failure_count=int(row['failure_count'] or 0),
+            send_count=int(row['send_count'] or 0),
+            last_sent_at=row['last_sent_at'],
         )
 
     # ============ STICKER SET METHODS ============

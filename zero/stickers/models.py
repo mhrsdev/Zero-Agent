@@ -32,6 +32,14 @@ class Sticker:
     saved_at: Optional[int] = None
     recent_saved: bool = False
     last_message_id: Optional[int] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
+    source_sender_id: Optional[int] = None
+    inferred_mood: Optional[str] = None
+    is_available: bool = True
+    failure_count: int = 0
+    send_count: int = 0
+    last_sent_at: Optional[int] = None
 
     def to_row(self) -> tuple:
         """Convert to database row tuple."""
@@ -102,10 +110,12 @@ class StickerSet:
 
 @dataclass(slots=True)
 class StickerCandidate:
-    """A candidate sticker for sending, with ranking score."""
+    """A candidate sticker plus explainable relevance metadata."""
     sticker: 'Sticker'
     score: float = 0.0
     match_reason: str = ''
+    relevance_score: float = 0.0
+    fallback_level: str = 'none'
 
 
 @dataclass(slots=True)

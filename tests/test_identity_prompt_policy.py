@@ -1,8 +1,9 @@
+from conftest import CONFIG_EXAMPLE
 from zero.config import ZeroConfig
 from zero.prompts import build_reply_prompt
 
 def prompt(memory=''):
-    c=ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    c=ZeroConfig.load(CONFIG_EXAMPLE)
     return build_reply_prompt(c,mode='normal',sender_label='u',user_text='من کی هستم؟',reply_text='',recent=[],group_summary='',memory_context=memory,chat_id=1,sender_id=2)
 
 def test_identity_prompt_requires_evidence_and_first_person():

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -103,6 +104,49 @@ class SocialAwareness:
             return SocialDecision(confidence, True, False, True, True, False, False, 'bounded_curiosity', emotion)
         return SocialDecision(confidence, False, False, False, False, False, True, 'not_addressed', emotion)
 
+    async def _active_human_conversation(self, message: IncomingMessage, *, window_seconds: int = 180) -> bool:
+        if not self.store or message.mention_zero or message.reply_to_zero or message.sender_is_bot:
+            return False
+        recent = await self.store.get_recent(message.chat_id, limit=8)
+        cutoff = int(time.time()) - max(1, int(window_seconds))
+        turns: list[int] = []
+        current_seen = False
+        for row in recent:
+            role = str(row.get('role', '')).casefold()
+            if role == 'assistant':
+                turns.clear()
+                current_seen = False
+                continue
+            if role != 'user' or int(row.get('created_at', 0) or 0) < cutoff:
+                continue
+            label = str(row.get('sender_label', '')).casefold().lstrip('@')
+            if label.endswith('bot') or label.endswith('bot_'):
+                continue
+            sender_id = int(row.get('sender_id', 0) or 0)
+            if not sender_id:
+                continue
+            row_message_id = int(row.get('telegram_message_id', 0) or 0)
+            if message.message_id and row_message_id == int(message.message_id) and sender_id == int(message.sender_id):
+                current_seen = True
+            if not turns or turns[-1] != sender_id:
+                turns.append(sender_id)
+        if not current_seen and (not turns or turns[-1] != int(message.sender_id)):
+            turns.append(int(message.sender_id))
+        return len(turns) >= 2 and len(set(turns[-4:])) >= 2
+
+    @staticmethod
+    def allows_autonomous_interjection(message: IncomingMessage, decision: SocialDecision) -> bool:
+        if (message.mention_zero or message.reply_to_zero or message.sender_is_bot or message.reply_text
+                or message.media_type or message.is_forwarded or message.is_service_message):
+            return False
+        if decision.reason not in {'not_addressed', 'bounded_curiosity'}:
+            return False
+        if decision.emotion != 'neutral' or decision.should_react or decision.should_search:
+            return False
+        if decision.confidence < 0.65:
+            return False
+        return bool(_PROJECT.search(message.text or ''))
+
     async def enabled(self, key: str, default: bool = True) -> bool:
         if not self.store:
             return default
@@ -119,6 +163,11 @@ class SocialAwareness:
         logger.info('SOCIAL_GROUP_CONTEXT trace_id=%s reason=aggregate_group_context confidence=%.2f chosen_action=observe reputation=%s short_topic=%s short_mood=%s', message.trace_id or '-', float(state.get('social_confidence', 1.0)), state.get('social_reputation', 0), short.get('active_topic', ''), short.get('mood', 'neutral'))
         decision = self.evaluate(message, state=state)
         explicit = bool(message.mention_zero or message.reply_to_zero)
+        if not explicit and await self._active_human_conversation(message):
+            decision = SocialDecision(
+                decision.confidence, False, False, True, False, False, True,
+                'active_human_conversation', decision.emotion,
+            )
         if short and not explicit and short.get('mood') in {'conflict', 'sad'}:
             decision = SocialDecision(decision.confidence, False, False, True, False, False, True, f'short_{short.get("mood")}', short.get('mood'))
         elif short and not explicit and float(short.get('negative_feedback_score', 0) or 0) >= 3:

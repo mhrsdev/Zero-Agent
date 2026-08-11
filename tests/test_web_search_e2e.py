@@ -1,3 +1,4 @@
+from conftest import CONFIG_RUNTIME, ROOT, RUNTIME_DIR
 #!/usr/bin/env python3
 """
 Real-time Telegram E2E test for Zero Web Search
@@ -7,7 +8,7 @@ import asyncio
 import os
 import sys
 import pytest
-sys.path.insert(0, '/root/zero')
+sys.path.insert(0, str(ROOT))
 
 from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError
@@ -20,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 async def test_web_search():
-    config = ZeroConfig.load('/root/zero/config/zero.yaml')
+    config = ZeroConfig.load(CONFIG_RUNTIME)
     
     # Use tgsearch session (separate from zero listener)
     client = TelegramClient(
@@ -56,7 +57,7 @@ async def test_web_search():
         await asyncio.sleep(15)
 
         # Read logs to verify web search was called
-        with open('/root/zero/runtime/logs/listener.log', 'r') as f:
+        with (RUNTIME_DIR / "logs" / "listener.log").open("r") as f:
             logs = f.read()
         
         # Get recent lines

@@ -15,6 +15,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,17 @@ CREATE TABLE IF NOT EXISTS identity_history(
 GROUP_SETTING_KEYS = frozenset({
     "persona", "provider_profile", "tool_policy", "web_search_enabled", "memory_enabled",
 })
+
+QUOTA_PERIODS = ("hour", "day", "week", "month")
+
+
+@dataclass(frozen=True)
+class QuotaDecision:
+    allowed: bool
+    blocked_period: str | None
+    usage: dict[str, int]
+    limits: dict[str, int]
+
 
 
 @dataclass(frozen=True)
@@ -287,13 +299,54 @@ class TenancyRegistry:
 
     # ---- quotas and usage ----------------------------------------------
 
+    @staticmethod
+    def _validate_quota(resource: str, period: str, limit: int | None = None) -> tuple[str, str, int | None]:
+        resource = str(resource or "").strip()
+        if not resource or len(resource) > 128:
+            raise ValueError("quota resource must be non-empty and at most 128 characters")
+        if period not in QUOTA_PERIODS:
+            raise ValueError(f"unsupported quota period: {period}")
+        parsed = None if limit is None else int(limit)
+        if parsed is not None and parsed < 0:
+            raise ValueError("quota limit must be zero or greater")
+        return resource, period, parsed
+
     def set_quota(self, scope: Scope, resource: str, limit: int, *, period: str = "day") -> None:
+        resource, period, parsed = self._validate_quota(resource, period, limit)
+        self.get_group(scope.installation_id, scope.group_id)
         with self._conn() as db:
             db.execute(
                 "INSERT INTO group_quotas(installation_id,group_id,resource,period,limit_value) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(installation_id,group_id,resource,period) DO UPDATE SET limit_value=excluded.limit_value",
-                (scope.installation_id, scope.group_id, resource, period, int(limit)),
+                (scope.installation_id, scope.group_id, resource, period, parsed),
             )
+
+    def set_quotas(self, scope: Scope, resource: str, limits: dict[str, int]) -> None:
+        self.get_group(scope.installation_id, scope.group_id)
+        parsed = [self._validate_quota(resource, period, limit) for period, limit in limits.items()]
+        with self._conn() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for item_resource, period, limit in parsed:
+                    db.execute(
+                        "INSERT INTO group_quotas(installation_id,group_id,resource,period,limit_value) VALUES(?,?,?,?,?) "
+                        "ON CONFLICT(installation_id,group_id,resource,period) DO UPDATE SET limit_value=excluded.limit_value",
+                        (scope.installation_id, scope.group_id, item_resource, period, limit),
+                    )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def quotas(self, scope: Scope, resource: str) -> dict[str, int]:
+        resource = str(resource or "").strip()
+        with self._conn() as db:
+            rows = db.execute(
+                "SELECT period,limit_value FROM group_quotas WHERE installation_id=? AND group_id=? AND resource=?",
+                (scope.installation_id, scope.group_id, resource),
+            ).fetchall()
+        values = {row["period"]: int(row["limit_value"]) for row in rows}
+        return {period: values[period] for period in QUOTA_PERIODS if period in values}
 
     def get_quota(self, scope: Scope, resource: str, *, period: str = "day") -> int | None:
         with self._conn() as db:
@@ -305,12 +358,75 @@ class TenancyRegistry:
 
     @staticmethod
     def _bucket(period: str, now: float | None = None) -> str:
+        if period not in QUOTA_PERIODS:
+            raise ValueError(f"unsupported quota period: {period}")
         stamp = time.gmtime(now if now is not None else time.time())
         if period == "hour":
             return time.strftime("%Y-%m-%dT%H", stamp)
-        if period == "month":
-            return time.strftime("%Y-%m", stamp)
-        return time.strftime("%Y-%m-%d", stamp)
+        if period == "day":
+            return time.strftime("%Y-%m-%d", stamp)
+        if period == "week":
+            iso_year, iso_week, _ = date(stamp.tm_year, stamp.tm_mon, stamp.tm_mday).isocalendar()
+            return f"{iso_year:04d}-W{iso_week:02d}"
+        return time.strftime("%Y-%m", stamp)
+
+    def consume_quotas(self, scope: Scope, resource: str, *, amount: int = 1, now: float | None = None) -> QuotaDecision:
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("quota amount must be positive")
+        limits = self.quotas(scope, resource)
+        if not limits:
+            return QuotaDecision(True, None, {}, {})
+        buckets = {period: self._bucket(period, now) for period in limits}
+        usage: dict[str, int] = {}
+        with self._conn() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for period in QUOTA_PERIODS:
+                    if period not in limits:
+                        continue
+                    row = db.execute(
+                        "SELECT used FROM usage_records WHERE installation_id=? AND group_id=? AND resource=? AND period=? AND bucket=?",
+                        (scope.installation_id, scope.group_id, resource, period, buckets[period]),
+                    ).fetchone()
+                    usage[period] = int(row["used"]) if row else 0
+                blocked = next((period for period in QUOTA_PERIODS if period in limits and usage[period] + amount > limits[period]), None)
+                if blocked is not None:
+                    db.execute("ROLLBACK")
+                    return QuotaDecision(False, blocked, usage, limits)
+                for period in QUOTA_PERIODS:
+                    if period not in limits:
+                        continue
+                    usage[period] += amount
+                    db.execute(
+                        "INSERT INTO usage_records(installation_id,group_id,resource,period,bucket,used,updated_at) VALUES(?,?,?,?,?,?,?) "
+                        "ON CONFLICT(installation_id,group_id,resource,period,bucket) DO UPDATE SET used=excluded.used,updated_at=excluded.updated_at",
+                        (scope.installation_id, scope.group_id, resource, period, buckets[period], usage[period], time.time()),
+                    )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return QuotaDecision(True, None, usage, limits)
+
+    def refund_quotas(self, scope: Scope, resource: str, *, amount: int = 1, now: float | None = None) -> None:
+        amount = max(0, int(amount))
+        limits = self.quotas(scope, resource)
+        if not limits or amount == 0:
+            return
+        with self._conn() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for period in limits:
+                    bucket = self._bucket(period, now)
+                    db.execute(
+                        "UPDATE usage_records SET used=MAX(0,used-?),updated_at=? WHERE installation_id=? AND group_id=? AND resource=? AND period=? AND bucket=?",
+                        (amount, time.time(), scope.installation_id, scope.group_id, resource, period, bucket),
+                    )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def consume(self, scope: Scope, resource: str, *, amount: int = 1, period: str = "day", now: float | None = None) -> tuple[bool, int, int | None]:
         """Consume quota for one group. Returns ``(allowed, used, limit)``.

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from conftest import CONFIG_EXAMPLE
 
 import pytest
 
@@ -227,7 +228,7 @@ async def test_google_grounding_uses_reply_url_as_search_query():
                 metadata={'raw': {'candidates': [{'groundingMetadata': {'groundingChunks': [{'web': {'uri': 'https://example.com/article', 'title': 'Article'}}]}}]}},
             )
 
-    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    config = ZeroConfig.load(CONFIG_EXAMPLE)
     router = Router()
     outcome = await GoogleGroundingSearch(config, router).run(
         'این لینک رو باز کن و بررسی کن', reply_text='https://example.com/article',
@@ -240,7 +241,7 @@ async def test_google_grounding_uses_reply_url_as_search_query():
 @pytest.mark.asyncio
 async def test_hybrid_web_wires_grounding_primary_to_google_searxng_fallback():
     calls: list[str] = []
-    config = ZeroConfig.load('/root/zero/config/zero.example.yaml')
+    config = ZeroConfig.load(CONFIG_EXAMPLE)
     config.web.enabled = True
     config.web.searxng_base_url = 'http://127.0.0.1:8888'
     transport = JsonTransport()

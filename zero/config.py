@@ -9,6 +9,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .paths import zero_home_path
+
 
 _SECRET_ENV = "ZERO_SECRET_FILE"
 
@@ -206,11 +208,31 @@ class StickersConfig(BaseModel):
     send_chance: float = 0.10
     chance_percent: int = 10
     limit_per_hour: int = 2
+    direct_limit_per_hour: int = 12
     cooldown_seconds: int = 600
+    direct_cooldown_seconds: int = 2
     min_messages_between: int = 5
+    min_relevance_score: float = 0.70
+    generic_min_relevance_score: float = 0.50
+    max_spam_score: float = 0.50
+    max_candidate_failures: int = 3
     repeat_window: int = 20
     auto_enabled: bool = True
     vision_enabled: bool = True
+
+
+class GifsConfig(BaseModel):
+    enabled: bool = True
+    auto_enabled: bool = False
+    send_chance: float = 0.05
+    limit_per_hour: int = 2
+    direct_limit_per_hour: int = 12
+    cooldown_seconds: int = 600
+    direct_cooldown_seconds: int = 2
+    min_messages_between: int = 5
+    repeat_window: int = 20
+    min_relevance_score: float = 0.70
+    max_spam_score: float = 0.50
 
 
 class ReactionsConfig(BaseModel):
@@ -278,7 +300,7 @@ class OfficeRetentionConfig(BaseModel):
 class OfficeConfig(BaseModel):
     enabled: bool = False
     cli_path: str = "/usr/local/lib/zero-office/officecli"
-    workspace_root: str = "/root/zero/runtime/office_jobs"
+    workspace_root: str = Field(default_factory=lambda: str(zero_home_path("office_jobs")))
     visual_review_enabled: bool = True
     pending_attachment_ttl_minutes: int = Field(default=30, ge=1, le=1440)
     lease_seconds: int = Field(default=360, ge=30)
@@ -376,6 +398,20 @@ class LogsConfig(BaseModel):
     router_log: str
 
 
+
+def _expand_runtime_paths(content: dict[str, Any]) -> None:
+    runtime_home = Path(os.environ.get("ZERO_HOME", "~/.zero")).expanduser()
+    def expand(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        value = value.replace("${ZERO_HOME}", str(runtime_home)).replace("$ZERO_HOME", str(runtime_home))
+        return os.path.expanduser(os.path.expandvars(value))
+    path_fields = (("management_bot", "token_file"), ("listener", "session_path"), ("telegram_search", "session_path"), ("memory", "db_path"), ("office", "workspace_root"), ("logs", "listener_log"), ("logs", "panel_log"), ("logs", "router_log"))
+    for section, field in path_fields:
+        section_data = content.get(section)
+        if isinstance(section_data, dict) and field in section_data:
+            section_data[field] = expand(section_data[field])
+
 class ZeroConfig(BaseModel):
     owner_user_id: int
     owner_username: str = "OWNER_USERNAME"
@@ -392,6 +428,7 @@ class ZeroConfig(BaseModel):
     telegram_search: TelegramSearchConfig = Field(default_factory=TelegramSearchConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     stickers: StickersConfig = Field(default_factory=StickersConfig)
+    gifs: GifsConfig = Field(default_factory=GifsConfig)
     reactions: ReactionsConfig = Field(default_factory=ReactionsConfig)
     office: OfficeConfig = Field(default_factory=OfficeConfig)
     logs: LogsConfig
@@ -401,6 +438,7 @@ class ZeroConfig(BaseModel):
     def load(cls, path: str | Path) -> "ZeroConfig":
         config_path = Path(path)
         content: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        _expand_runtime_paths(content)
         default_secret = config_path.resolve().parents[1] / "runtime" / "secrets" / "zero.secrets.yaml"
         secret_path = Path(os.environ.get(_SECRET_ENV, str(default_secret)))
         _apply_secret_file(content, secret_path)

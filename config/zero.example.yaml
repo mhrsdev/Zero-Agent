@@ -1,12 +1,12 @@
 owner_user_id: 0
 owner_username: "OWNER_USERNAME"
 management_bot:
-  token_file: "/path/to/secret/bot.env"
+  token_file: "$ZERO_HOME/secrets/bot.env"
   deny_message: "دسترسی نداری."
 listener:
   telegram_api_id: 0
   telegram_api_hash: ""
-  session_path: "/path/to/secret/user_session"
+  session_path: "$ZERO_HOME/secrets/user_session"
   account_username: "LISTENER_USERNAME"
   allowed_group_ids: []
   allowed_group_usernames: []
@@ -53,7 +53,7 @@ router:
       model: "google/gemma-4-31b-it:free"
       keys: []
 memory:
-  db_path: "/path/to/runtime/state/zero.db"
+  db_path: "$ZERO_HOME/state/zero.db"
   recent_messages_limit: 5000
   memory_items_limit: 200
   long_term_limit: 120
@@ -85,7 +85,7 @@ office:
   rollout_user_ids: []
   rollout_chat_ids: []
   cli_path: "/usr/local/lib/zero-office/officecli"
-  workspace_root: "/root/zero/runtime/office_jobs"
+  workspace_root: "$ZERO_HOME/office_jobs"
   quota:
     jobs_per_user_per_day: 1
     max_characters_per_job: 40000
@@ -127,6 +127,6 @@ office:
   lease_seconds: 360
   max_attempts: 3
 logs:
-  listener_log: "/path/to/runtime/logs/listener.log"
-  panel_log: "/path/to/runtime/logs/panel.log"
-  router_log: "/path/to/runtime/logs/router.log"
+  listener_log: "$ZERO_HOME/logs/listener.log"
+  panel_log: "$ZERO_HOME/logs/panel.log"
+  router_log: "$ZERO_HOME/logs/router.log"

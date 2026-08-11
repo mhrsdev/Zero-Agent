@@ -251,7 +251,7 @@ class KnowledgeWorker:
     async def _run_nightly_impl(self, run_id: str, trace_id: str, *, dry_run: bool = False, topic_limit: int | None = None) -> dict[str, Any]:
         started = time.monotonic()
         if not dry_run and (os.getloadavg()[0] > max(1.0, (os.cpu_count() or 1) * 0.8) or not _memory_available_ok()):
-            return {'status': 'SKIPPED_RESOURCE_PRESSURE', 'dry_run': False, 'topics': 0, 'llm_calls_used': 0}
+            return {"run_id": run_id, "status": "SKIPPED_RESOURCE_PRESSURE", "reason": "resource_pressure", "dry_run": False, "topics": 0, "llm_calls_used": 0, "accepted_count": 0, "rejected_count": 0, "simulation": False}
         limit = topic_limit or await self._setting_int('knowledge_nightly_topic_limit')
         llm_limit = await self._setting_int('knowledge_nightly_llm_call_limit')
         result_limit, page_limit = await self._setting_int('knowledge_results_per_topic'), await self._setting_int('knowledge_pages_per_topic')

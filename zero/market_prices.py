@@ -10,6 +10,8 @@ from typing import Any
 
 import aiohttp
 
+from .paths import zero_home_path
+
 
 class PriceAPIError(RuntimeError):
     pass
@@ -83,8 +85,8 @@ class NavasanPriceClient:
     DEFAULT_ITEMS = ('18ayar', 'sekkeh')
     _item_re = re.compile(r'^[a-z0-9_]{1,40}$')
 
-    def __init__(self, api_key_path: str = '/root/zero/runtime/secrets/navasan_api_key') -> None:
-        self.api_key_path = api_key_path
+    def __init__(self, api_key_path: str | None = None) -> None:
+        self.api_key_path = api_key_path or str(zero_home_path("secrets", "navasan_api_key"))
 
     def _api_key(self) -> str:
         try:
