@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -19,6 +20,7 @@ from .web_search.orchestrator import SearchOrchestrator
 from .web_search.pipeline import SearchPipeline
 from .web_search.providers.base import ProviderRegistry
 from .web_search.providers.searxng import SearXNGProvider
+from .web_search.providers.tavily import TavilyProvider
 from .web_search.query import QueryRewriter
 from .web_search.transport import ConnectionPoolTransport
 from .web_search.truth import TruthfulnessGuard
@@ -77,6 +79,18 @@ class HybridWeb:
         self._primary = primary or GoogleGroundingSearch(config, IndependentRouter(config), store)
 
         registry = ProviderRegistry()
+        tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+        self._tavily_configured = bool(config.web.tavily_enabled)
+        self._tavily_available = self._tavily_configured and bool(tavily_key)
+        if self._tavily_available:
+            registry.register(TavilyProvider(
+                tavily_key,
+                self._transport,
+                max_results=config.web.max_search_results,
+                timeout=config.web.request_timeout_seconds,
+            ))
+        elif self._tavily_configured:
+            logger.warning("TAVILY_UNAVAILABLE reason=missing_api_key")
         provider_args = {
             'base_url': config.web.searxng_base_url,
             'transport': self._transport,
@@ -144,6 +158,10 @@ class HybridWeb:
     async def health_check(self) -> tuple[bool, str]:
         if not self.enabled():
             return False, 'web search disabled'
+        if self._tavily_configured:
+            if self._tavily_available:
+                return True, 'tavily'
+            return False, 'tavily API key missing'
         primary_ok, primary_error = await self._primary.health_check()
         if primary_ok:
             return True, 'google-grounding'

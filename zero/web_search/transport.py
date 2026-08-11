@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import json
 import queue
 import socket
 import ssl
@@ -30,12 +31,58 @@ class ConnectionPoolTransport:
         return sum(pool.qsize() for pool in self._idle.values())
 
     async def get_text(self, url: str, timeout: float, max_bytes: int) -> str:
+        return await self._request_text("GET", url, timeout, max_bytes)
+
+    async def post_json(
+        self,
+        url: str,
+        payload: dict,
+        timeout: float,
+        max_bytes: int,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> str:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        request_headers = dict(headers or {})
+        request_headers["Content-Type"] = "application/json"
+        return await self._request_text(
+            "POST", url, timeout, max_bytes, body=body, headers=request_headers,
+        )
+
+    async def _request_text(
+        self,
+        method: str,
+        url: str,
+        timeout: float,
+        max_bytes: int,
+        *,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> str:
         key = self._key(url)
         semaphore = self._semaphores.setdefault(key, asyncio.Semaphore(self.max_connections_per_host))
         async with semaphore:
-            return await asyncio.to_thread(self._get_text_sync, url, timeout, max_bytes, key)
+            return await asyncio.to_thread(
+                self._request_text_sync,
+                method,
+                url,
+                timeout,
+                max_bytes,
+                key,
+                body,
+                headers or {},
+            )
 
-    def _get_text_sync(self, url: str, timeout: float, max_bytes: int, key) -> str:
+    def _request_text_sync(
+        self,
+        method: str,
+        url: str,
+        timeout: float,
+        max_bytes: int,
+        key,
+        body: bytes | None,
+        headers: dict[str, str],
+    ) -> str:
         if self._closed:
             raise RuntimeError('transport is closed')
         parts = urlsplit(url)
@@ -48,18 +95,24 @@ class ConnectionPoolTransport:
         except queue.Empty:
             connection = self._new_connection(key, timeout)
         reusable = False
+        request_headers = {
+            'User-Agent': self.user_agent,
+            'Accept': 'application/json,text/html,application/xml,text/xml,*/*;q=0.5',
+            'Connection': 'keep-alive',
+            **headers,
+        }
         try:
             connection.timeout = timeout
-            connection.request('GET', path, headers={'User-Agent': self.user_agent, 'Accept': 'application/json,text/html,application/xml,text/xml,*/*;q=0.5', 'Connection': 'keep-alive'})
+            connection.request(method, path, body=body, headers=request_headers)
             response = connection.getresponse()
             if 300 <= response.status < 400:
                 raise RuntimeError(f'HTTP redirect rejected: {response.status}')
-            body = response.read(max_bytes + 1)
+            response_body = response.read(max_bytes + 1)
             if response.status >= 400:
                 raise RuntimeError(f'HTTP {response.status}')
-            reusable = len(body) <= max_bytes and not response.will_close
+            reusable = len(response_body) <= max_bytes and not response.will_close
             charset = response.headers.get_content_charset() or 'utf-8'
-            return body[:max_bytes].decode(charset, 'replace')
+            return response_body[:max_bytes].decode(charset, 'replace')
         finally:
             if reusable and not self._closed:
                 pool.put(connection)

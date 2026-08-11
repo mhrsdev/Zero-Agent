@@ -121,7 +121,7 @@ async def run_simulation(
     *,
     message_count: int = 1000,
     seed: int = 1389,
-    config_path: str | Path = "/workspace/Zero-Agent/config/zero.example.yaml",
+    config_path: str | Path = Path(__file__).resolve().parents[1] / "config" / "zero.example.yaml",
 ) -> dict[str, Any]:
     if message_count < 120:
         raise ValueError("message_count must be at least 120 for the reply-chain scenarios")

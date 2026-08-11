@@ -164,6 +164,7 @@ class ReportingConfig(BaseModel):
 class WebConfig(BaseModel):
     enabled: bool = False
     google_grounding_enabled: bool = True
+    tavily_enabled: bool = False
     searxng_base_url: str = "http://127.0.0.1:8888"
     max_search_results: int = 6
     request_timeout_seconds: int = 12
