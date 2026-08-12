@@ -48,6 +48,35 @@ jobs:
           python -m zero status
           python scripts/migrate_memory_v1_to_v3.py --help
 
+  windows-tui-setup:
+    name: Windows TUI and setup (Python 3.11)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Compile TUI and setup paths
+        run: python -m compileall -q zero
+      - name: Portable TUI and setup regression suite
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          tests/test_tui_windows_portability.py
+          tests/test_tui.py
+          tests/test_cli.py
+          tests/test_canonical_configuration.py
+          tests/test_configuration_resolution.py
+          tests/test_portable_config_paths.py
+          tests/test_panel_setup_service.py
+          tests/test_panel_local_api.py
+          tests/test_panel_store.py
+      - name: Console CLI smoke
+        run: python -m zero tui --print --panel sessions
+
   lint:
     name: Lint
     runs-on: ubuntu-24.04

@@ -594,7 +594,8 @@ class ZeroStore:
         self.long_term_limit = max(1, int(long_term_limit))
         parent_preexisted = self.db_path.parent.exists()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if not parent_preexisted or self.db_path.parent.stat().st_uid == os.geteuid():
+        geteuid = getattr(os, "geteuid", None)
+        if not parent_preexisted or (geteuid is not None and self.db_path.parent.stat().st_uid == geteuid()):
             os.chmod(self.db_path.parent, 0o700)
         self._restrict_db_permissions()
         self._lock = asyncio.Lock()

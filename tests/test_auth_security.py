@@ -108,23 +108,20 @@ class TestDefaultAdminSecurity:
 
 
 class TestSecretStripping:
-    """Setup state must never expose secrets."""
+    """Setup state must never accept or expose secrets."""
 
-    def test_setup_state_strips_secrets(self, store):
-        store.save_setup_step("credentials", {
-            "api_key": "sk-secret-1234567890",
-            "bot_token": "123456:ABC-DEF",
-            "password": "my_secret_password",
-            "safe_value": "this is fine",
-        })
+    def test_setup_state_rejects_secret_payloads(self, store):
+        raw_bot_token = "123456:" + ("a" * 31)
+        with pytest.raises(ValueError, match="validation"):
+            store.save_setup_step("credentials", {
+                "api_key": "sk-" + ("a" * 32),
+                "bot_token": raw_bot_token,
+                "password": "my_secret_password",
+                "safe_value": "this is fine",
+            })
         state = store.get_setup_state()
-        creds = state["data"].get("credentials", {})
-        assert creds.get("api_key") == "[stored securely]"
-        assert creds.get("bot_token") == "[stored securely]"
-        assert creds.get("password") == "[stored securely]"
-        assert creds.get("safe_value") == "this is fine"
-        # The raw string must not appear in the state JSON
-        assert "sk-secret-1234567890" not in json.dumps(state)
+        assert not state["data"]
+        assert raw_bot_token not in json.dumps(state)
 
 
 class TestDuplicateAdminPrevention:

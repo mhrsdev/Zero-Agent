@@ -9,7 +9,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .configuration import SetupService
+from .configuration import (
+    SetupService,
+    TelegramConfig,
+    ensure_private_directory,
+    is_credential_like,
+    is_safe_installation_id,
+    is_symbolic_secret_reference,
+    restrict_private_file,
+)
+from .paths import zero_home
 
 SETUP_STEPS = (
     "welcome",
@@ -26,6 +35,24 @@ SETUP_STEPS = (
     "start",
 )
 _SECRET_KEYS = {"token", "bot_token", "api_key", "api_hash", "password", "otp", "session"}
+_TELEGRAM_SETUP_KEYS = frozenset({"mode", "bot_token_ref", "api_id", "api_hash_ref", "session_ref"})
+_SETUP_STEP_KEYS: dict[str, frozenset[str]] = {
+    "welcome": frozenset(),
+    "profile": frozenset({"profile", "installation_id"}),
+    "administrator": frozenset(),
+    "telegram": _TELEGRAM_SETUP_KEYS,
+    "credentials": frozenset(),
+    "provider": frozenset({"provider", "model"}),
+    "web_search": frozenset({"enabled", "provider", "api_key_ref"}),
+    "features": frozenset({"office", "proactive"}),
+    "groups": frozenset({"chat_id", "name"}),
+    "review": frozenset(),
+    "validation": frozenset({"config_valid"}),
+    "start": frozenset({"ready"}),
+}
+_PROFILE_CHOICES = frozenset({"personal", "single_group", "multi_group", "advanced"})
+_PROVIDER_CHOICES = frozenset({"openrouter", "gemini", "custom"})
+_WEB_SEARCH_PROVIDERS = frozenset({"disabled", "tavily", "brave"})
 
 
 class DuplicateAdminError(ValueError):
@@ -54,7 +81,13 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 def _strip_secrets(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: "[stored securely]" if k.casefold() in _SECRET_KEYS or any(part in k.casefold() for part in ("token", "secret", "password", "api_key", "api_hash")) else _strip_secrets(v) for k, v in value.items()}
+        return {
+            k: "[stored securely]"
+            if k.casefold() in _SECRET_KEYS
+            or any(part in k.casefold() for part in ("token", "secret", "password", "api_key", "api_hash", "session"))
+            else _strip_secrets(v)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_strip_secrets(v) for v in value]
     return value
@@ -64,8 +97,13 @@ class PanelStore:
     def __init__(self, path: str | Path, *, setup_service: SetupService | None = None):
         self.path = Path(path)
         self.setup_service = setup_service
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            managed_runtime_path = self.path.parent.resolve() == zero_home().resolve()
+        except OSError:
+            managed_runtime_path = False
+        ensure_private_directory(self.path.parent, repair_existing=managed_runtime_path)
         self._init()
+        restrict_private_file(self.path)
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path)
@@ -106,9 +144,149 @@ class PanelStore:
             if "must_change_password" not in columns:
                 db.execute("ALTER TABLE panel_admins ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
 
+    def snapshot_setup_state(self) -> tuple[str, int, str, int]:
+        """Capture the wizard row so a coordinated setup can be compensated."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT current_step, completed, data_json, updated_at FROM panel_setup WHERE id=1"
+            ).fetchone()
+        if row is None:  # pragma: no cover - _init creates the singleton row
+            raise sqlite3.Error("panel setup row is unavailable")
+        return (row["current_step"], row["completed"], row["data_json"], row["updated_at"])
+
+    def restore_setup_state(self, snapshot: tuple[str, int, str, int]) -> None:
+        """Restore only wizard progress, leaving administrators and sessions intact."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE panel_setup SET current_step=?, completed=?, data_json=?, updated_at=? WHERE id=1",
+                snapshot,
+            )
+
+    @staticmethod
+    def remove_database_files(path: str | Path) -> None:
+        """Remove a newly-created panel database and any SQLite sidecars."""
+        panel_path = Path(path)
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            try:
+                panel_path.with_name(f"{panel_path.name}{suffix}").unlink()
+            except FileNotFoundError:
+                pass
+
     @staticmethod
     def _token_hash(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
+
+    @staticmethod
+    def _normalize_telegram_setup(data: dict[str, Any]) -> dict[str, Any]:
+        """Convert browser form values to the canonical reference-only schema."""
+        if set(data) - _TELEGRAM_SETUP_KEYS:
+            raise ValueError("telegram setup validation failed")
+
+        mode = data.get("mode", "disabled")
+        if not isinstance(mode, str) or not mode.strip():
+            raise ValueError("telegram setup validation failed")
+        normalized: dict[str, Any] = {"mode": mode.strip().casefold()}
+
+        for key in ("bot_token_ref", "api_hash_ref", "session_ref"):
+            value = data.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError("telegram setup validation failed")
+            value = value.strip()
+            if value:
+                normalized[key] = value
+
+        raw_api_id = data.get("api_id")
+        if isinstance(raw_api_id, str):
+            raw_api_id = raw_api_id.strip() or None
+        if raw_api_id is not None:
+            if isinstance(raw_api_id, bool) or not isinstance(raw_api_id, (str, int)):
+                raise ValueError("telegram setup validation failed")
+            try:
+                api_id = int(raw_api_id)
+            except ValueError as exc:
+                raise ValueError("telegram setup validation failed") from exc
+            if api_id <= 0:
+                raise ValueError("telegram setup validation failed")
+            normalized["api_id"] = api_id
+        try:
+            return TelegramConfig.model_validate(normalized).model_dump(mode="python", exclude_none=True)
+        except ValueError as exc:
+            raise ValueError("telegram setup validation failed") from exc
+
+    @staticmethod
+    def _normalize_setup_step(step: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Validate every persisted setup payload against its public schema."""
+        if not isinstance(data, dict) or set(data) - _SETUP_STEP_KEYS[step]:
+            raise ValueError("setup validation failed")
+        if step == "telegram":
+            return PanelStore._normalize_telegram_setup(data)
+        if step in {"welcome", "administrator", "credentials", "review"}:
+            return {}
+        if step == "profile":
+            if not data:
+                return {}
+            if set(data) == {"installation_id"}:
+                installation_id = data["installation_id"]
+                if not is_safe_installation_id(installation_id):
+                    raise ValueError("setup validation failed")
+                return {"installation_id": installation_id.strip()}
+            profile = data.get("profile")
+            if set(data) != {"profile"} or not isinstance(profile, str) or profile not in _PROFILE_CHOICES:
+                raise ValueError("setup validation failed")
+            return {"profile": profile}
+        if step == "provider":
+            provider = data.get("provider")
+            model = data.get("model", "")
+            if (
+                not isinstance(provider, str)
+                or provider not in _PROVIDER_CHOICES
+                or not isinstance(model, str)
+                or len(model) > 128
+                or is_credential_like(model)
+            ):
+                raise ValueError("setup validation failed")
+            return {"provider": provider, "model": model.strip()}
+        if step == "web_search":
+            provider = data.get("provider", "disabled")
+            enabled = data.get("enabled", False)
+            api_key_ref = data.get("api_key_ref")
+            if provider not in _WEB_SEARCH_PROVIDERS or enabled not in {False, True, "", "on"}:
+                raise ValueError("setup validation failed")
+            normalized: dict[str, Any] = {"enabled": enabled in {True, "on"}, "provider": provider}
+            if api_key_ref not in {None, ""}:
+                if not isinstance(api_key_ref, str) or not is_symbolic_secret_reference(api_key_ref.strip()):
+                    raise ValueError("setup validation failed")
+                normalized["api_key_ref"] = api_key_ref.strip()
+            return normalized
+        if step == "features":
+            if any(value not in {True, False, "", "on"} for value in data.values()):
+                raise ValueError("setup validation failed")
+            return {"office": data.get("office") in {True, "on"}, "proactive": data.get("proactive") in {True, "on"}}
+        if step == "groups":
+            chat_id = data.get("chat_id", "")
+            name = data.get("name", "")
+            if not isinstance(name, str) or len(name) > 128 or is_credential_like(name):
+                raise ValueError("setup validation failed")
+            normalized = {"name": name.strip()}
+            if chat_id not in {None, ""}:
+                if isinstance(chat_id, bool) or not isinstance(chat_id, (str, int)):
+                    raise ValueError("setup validation failed")
+                try:
+                    normalized["chat_id"] = int(chat_id)
+                except ValueError as exc:
+                    raise ValueError("setup validation failed") from exc
+            return normalized
+        if step == "validation":
+            if set(data) != {"config_valid"} or not isinstance(data["config_valid"], bool):
+                raise ValueError("setup validation failed")
+            return {"config_valid": data["config_valid"]}
+        if step == "start":
+            if set(data) != {"ready"} or not isinstance(data["ready"], bool):
+                raise ValueError("setup validation failed")
+            return {"ready": data["ready"]}
+        raise ValueError("setup validation failed")
 
     def create_admin(self, username: str, password: str, *, must_change_password: bool = False) -> int:
         username = username.strip().lower()
@@ -164,16 +342,18 @@ class PanelStore:
     def save_setup_step(self, step: str, data: dict[str, Any]) -> None:
         if step not in SETUP_STEPS:
             raise ValueError("unknown setup step")
-        if step == "telegram" and self.setup_service is not None:
-            state = self.setup_service.apply_telegram(
-                mode=data.get("mode", "disabled"),
-                bot_token_ref=data.get("bot_token_ref"),
-                api_id=data.get("api_id"),
-                api_hash_ref=data.get("api_hash_ref"),
-                session_ref=data.get("session_ref"),
-            )
-            if "telegram" not in state.completed_steps:
-                raise ValueError("telegram setup validation failed")
+        data = self._normalize_setup_step(step, data)
+        if step == "telegram":
+            if self.setup_service is not None:
+                state = self.setup_service.apply_telegram(
+                    mode=data.get("mode", "disabled"),
+                    bot_token_ref=data.get("bot_token_ref"),
+                    api_id=data.get("api_id"),
+                    api_hash_ref=data.get("api_hash_ref"),
+                    session_ref=data.get("session_ref"),
+                )
+                if "telegram" not in state.completed_steps:
+                    raise ValueError("telegram setup validation failed")
         with self._connect() as db:
             row = db.execute("SELECT data_json FROM panel_setup WHERE id=1").fetchone()
             current = json.loads(row["data_json"])

@@ -11,7 +11,7 @@ Repository: <https://github.com/mhrsdev/Zero-Agent.git>
 - Telegram user-session listener using Telethon, restricted by configured group allowlists.
 - Owner-only Telegram management bot using aiogram.
 - Local `aiohttp` administration panel with health, authentication, setup, and operational views.
-- Curses-style TUI with status, doctor, groups, backup, logs, and setup panels.
+- Curses-style TUI with status, doctor, groups, backup, logs, setup, chat, and sessions panels.
 - SQLite storage and the current Memory V3 service, with migration tooling from older V1 data.
 - Legacy runtime provider routing for Gemini and OpenRouter, including key pools, cooldowns, quotas, retries, and fallback.
 - A separate Provider Registry component with symbolic secret references, fallback chains, rate limiting, health, and usage accounting.
@@ -114,7 +114,19 @@ python -m zero tui
 python -m zero tui --print
 python -m zero tui --print --panel setup
 python -m zero tui --print --panel chat
+python -m zero tui --print --panel sessions
 ```
+
+On Windows CPython, where the optional `_curses` backend is normally absent,
+`zero tui` starts a portable line-oriented console instead of printing one panel
+and immediately exiting. It remains open until `q`/`quit`; `zero setup` uses a
+matching portable wizard, so neither command requires installing `windows-curses`.
+
+Unless `ZERO_CANONICAL_CONFIG` is set, setup writes the shared canonical file at
+`~/.zero/config/zero.json` (normally under `%USERPROFILE%/.zero/config/zero.json`
+on Windows), not a path relative to the current checkout. The legacy runtime
+still requires `~/.zero/config/zero.yaml` or `ZERO_CONFIG_PATH`; `zero doctor`
+reports either missing or invalid layer before a listener or panel is started.
 
 The interactive TUI also has a conversational `Chat` panel. It uses the real
 ZeroBrain policy/router/memory path and keeps sessions in the current process:
@@ -129,11 +141,16 @@ stream, so the TUI reports truthful thinking/completion progress and never
 simulates token streaming. Provider credentials remain in the protected runtime
 secret configuration and are never entered into the chat UI.
 
-Interactive controls: `1`–`7` select panels, `Tab` or `←/→` navigates,
+Curses controls: `1`–`8` select panels, `Tab` or `←/→` navigates,
 `↑/↓`/`j`/`k` scroll, `PageUp`/`PageDown` jump, `Home`/`End` move to the
 bounds, `r` refreshes (and explicitly creates a backup only on the Backup
 panel), `Enter` starts the Setup wizard from the Setup panel, and `q`/`Esc`
-exits. The setup wizard persists only canonical settings and symbolic secret
+exits. In the portable Windows console, use `1`–`8` or a panel name to
+navigate, `setup` to start the wizard, `chat <prompt>` to send a message, `r`
+to refresh (or create a backup on the Backup panel), and `q`/`quit` to exit.
+`zero tui --print --panel backup` is read-only; opening or printing the Backup
+panel never creates a snapshot.
+The setup wizard persists only canonical settings and symbolic secret
 references; it never asks for or stores raw provider, Telegram, or session
 credentials.
 
@@ -166,7 +183,7 @@ python -m zero doctor
 curl -fsS http://127.0.0.1:8787/api/health
 ```
 
-`zero doctor` performs local checks and does not contact Telegram or an AI provider. It reports Python, runtime-home, canonical-config, SQLite FTS5, and dependency observations. A clean-container Docker health check targets the panel endpoint.
+`zero doctor` performs local checks and does not contact Telegram or an AI provider. It reports Python, runtime-home, canonical JSON, the legacy runtime YAML, SQLite FTS5, and dependency observations. A clean-container Docker health check targets the panel endpoint.
 
 ## Testing
 

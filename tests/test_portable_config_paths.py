@@ -55,3 +55,36 @@ def test_runtime_config_default_follows_zero_home(monkeypatch, tmp_path):
     monkeypatch.delenv("ZERO_CONFIG_PATH", raising=False)
     monkeypatch.setenv("ZERO_HOME", str(tmp_path / "portable-home"))
     assert Path(runtime_config_path()) == tmp_path / "portable-home" / "config" / "zero.yaml"
+
+
+def test_zero_home_resolves_relative_runtime_home(monkeypatch, tmp_path):
+    from zero.paths import zero_home
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZERO_HOME", "portable-home")
+
+    assert zero_home() == tmp_path / "portable-home"
+    assert zero_home().is_absolute()
+
+
+def test_panel_and_listener_share_the_portable_runtime_config_default():
+    root = Path(__file__).resolve().parents[1]
+    expected = "CONFIG_PATH = Path(runtime_config_path())"
+
+    assert expected in (root / "scripts" / "run_listener.py").read_text(encoding="utf-8")
+    assert expected in (root / "scripts" / "run_panel.py").read_text(encoding="utf-8")
+
+
+def test_panel_setup_state_path_follows_runtime_home(monkeypatch, tmp_path):
+    from zero.paths import panel_state_path
+
+    monkeypatch.setenv("ZERO_HOME", str(tmp_path / "runtime-home"))
+
+    assert panel_state_path() == tmp_path / "runtime-home" / "panel.db"
+
+
+def test_panel_composition_uses_the_shared_setup_state_path():
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "run_panel.py").read_text(encoding="utf-8")
+
+    assert "panel_store=PanelStore(" in source
+    assert "panel_state_path()," in source

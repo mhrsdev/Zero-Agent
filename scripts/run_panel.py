@@ -26,7 +26,7 @@ from zero.config import ZeroConfig
 from zero.configuration import ConfigStore, SetupService
 from zero.runtime_config import load_effective_config, runtime_config_path
 from zero.logging_utils import setup_logger
-from zero.paths import zero_home
+from zero.paths import panel_state_path, zero_home
 from zero.management import load_bot_token
 from zero.router import IndependentRouter
 from zero.runtime_control import listener_status, restart_listener, start_listener, stop_listener
@@ -41,7 +41,7 @@ from zero.knowledge import KnowledgeWorker
 from zero.panel_api import PanelAPI
 from zero.panel_store import PanelStore
 
-CONFIG_PATH = Path(runtime_config_path('/etc/zero/zero.yaml'))
+CONFIG_PATH = Path(runtime_config_path())
 
 
 def owner_only(config: ZeroConfig, message: Message) -> bool:
@@ -80,7 +80,7 @@ async def main() -> None:
         config, store, router, bot, static_dir=ROOT / 'panel',
         services={'knowledge': knowledge, 'jobs': jobs, 'semantic': semantic, 'experience': experience, 'procedure': procedure, 'world': world},
         panel_store=PanelStore(
-            Path(config.memory.db_path).with_name('panel.db'),
+            panel_state_path(),
             setup_service=SetupService(
                 ConfigStore(),
                 installation_id=os.environ.get('ZERO_INSTALLATION_ID', 'local'),

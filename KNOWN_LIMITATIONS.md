@@ -7,9 +7,9 @@
 3. **Live web/Telegram tests** — 3 tests require network access and `ZERO_LIVE_E2E=1` environment variable. They are opt-in by design.
 4. **Memory corpus minimum** — 1 test checks for a minimum number of corpus items that the test environment doesn't have.
 
-## Not Yet Implemented
+## Implemented with limits / Not yet implemented
 
-5. **Zero TUI** — No terminal UI module exists. The panel (web-based dashboard) is the primary admin interface.
+5. **Zero TUI** — Implemented as a curses UI with a persistent line-console fallback when `_curses` is unavailable or terminal initialization fails. The portable UI supports status, doctor, groups, backup, logs, setup, chat, and sessions. It still requires an interactive TTY; use `zero tui --print` for a one-shot noninteractive report.
 6. **Community E2E** — End-to-end testing with multiple real Telegram users and groups requires live credentials and cannot be done in isolation.
 7. **`proactive_followups` table** — Does not yet have `installation_id`/`group_id` columns in the base schema (P0-2 handles this via ALTER TABLE migration). The `reserve()` call passes scope, but the source followup row doesn't carry scope yet.
 

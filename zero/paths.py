@@ -19,20 +19,26 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Mapping
 
 ZERO_HOME_ENV = "ZERO_HOME"
 DEFAULT_ZERO_HOME = "~/.zero"
 
 
-def zero_home(env: os._Environ[str] | dict[str, str] | None = None) -> Path:
+def zero_home(env: Mapping[str, str] | None = None) -> Path:
     """Return the expanded, absolute private runtime home."""
     values = os.environ if env is None else env
-    return Path(values.get(ZERO_HOME_ENV, DEFAULT_ZERO_HOME)).expanduser()
+    return Path(values.get(ZERO_HOME_ENV, DEFAULT_ZERO_HOME)).expanduser().resolve()
 
 
 def zero_home_path(*parts: str | Path) -> Path:
     """Join ``parts`` under the expanded runtime home."""
     return zero_home().joinpath(*parts)
+
+
+def panel_state_path(env: Mapping[str, str] | None = None) -> Path:
+    """Return the one shared durable setup-state database path."""
+    return zero_home(env) / "panel.db"
 
 
 def repo_root() -> Path:

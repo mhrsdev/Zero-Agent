@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import runpy
 import sqlite3
 import sys
 from pathlib import Path
 
 from .configuration import ConfigStore, canonical_config_path
-from .paths import repo_path, zero_home
+from .paths import panel_state_path, repo_path, zero_home
+from .runtime_config import runtime_config_path
+from .tui_contract import PANEL_NAMES
 
 VERSION = "0.1.0-alpha"
 
@@ -26,25 +27,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--config", type=Path, default=None, help="Path to canonical config")
     setup.add_argument("--panel-db", type=Path, default=None, help="Path to setup state database")
     tui_parser = sub.add_parser("tui", help="run the terminal admin interface")
-    tui_parser.add_argument("--print", action="store_true",
-                            help="Print the selected panel once and exit (non-interactive)")
-    tui_parser.add_argument("--panel", default="status",
-                            choices=("status", "doctor", "groups", "backup", "logs", "setup", "chat"),
-                            help="Which panel to display (default: status)")
-    tui_parser.add_argument("--store", type=Path, default=None,
-                            help="Path to ZeroStore database")
-    tui_parser.add_argument("--config", type=Path, default=None,
-                            help="Path to canonical config")
-    tui_parser.add_argument("--runtime-config", type=Path, default=None,
-                            help="Path to legacy runtime YAML used by Chat")
-    tui_parser.add_argument("--tail", type=int, default=50,
-                            help="Number of log lines to show (logs panel)")
-    tui_parser.add_argument("--no-animation", action="store_true",
-                            help="Skip the bounded interactive startup animation")
+    tui_parser.add_argument("--print", action="store_true", help="Print the selected panel once and exit (non-interactive)")
+    tui_parser.add_argument("--panel", default="status", choices=PANEL_NAMES, help="Which panel to display (default: status)")
+    tui_parser.add_argument("--store", type=Path, default=None, help="Path to ZeroStore database")
+    tui_parser.add_argument("--config", type=Path, default=None, help="Path to canonical config")
+    tui_parser.add_argument("--runtime-config", type=Path, default=None, help="Path to legacy runtime YAML used by Chat")
+    tui_parser.add_argument("--tail", type=int, default=50, help="Number of log lines to show (logs panel)")
+    tui_parser.add_argument("--no-animation", action="store_true", help="Skip the bounded interactive startup animation")
     config = sub.add_parser("config", help="inspect configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show")
-    show.add_argument("--path", default=os.getenv("ZERO_CANONICAL_CONFIG", "config/zero.json"))
+    show.add_argument("--path", default=str(canonical_config_path()))
     return parser
 
 
@@ -52,7 +45,10 @@ def _check(name: str, ok: bool, detail: str) -> dict[str, object]:
     return {"check": name, "ok": bool(ok), "detail": detail}
 
 
-def diagnostics() -> list[dict[str, object]]:
+def diagnostics(
+    config_path: str | Path | None = None,
+    runtime_path: str | Path | None = None,
+) -> list[dict[str, object]]:
     """Local, side-effect-free health checks.
 
     Every check reports a real observation. None of them contacts Telegram or a
@@ -61,11 +57,13 @@ def diagnostics() -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
 
     version = sys.version_info
-    results.append(_check(
-        "python_version",
-        version >= (3, 11),
-        f"{version.major}.{version.minor}.{version.micro}",
-    ))
+    results.append(
+        _check(
+            "python_version",
+            version >= (3, 11),
+            f"{version.major}.{version.minor}.{version.micro}",
+        )
+    )
 
     home = zero_home()
     results.append(_check("runtime_home_exists", home.is_dir(), str(home)))
@@ -79,7 +77,7 @@ def diagnostics() -> list[dict[str, object]]:
             writable, detail = False, type(exc).__name__
         results.append(_check("runtime_home_writable", writable, detail))
 
-    config_path = canonical_config_path()
+    config_path = Path(config_path) if config_path is not None else canonical_config_path()
     if config_path.exists():
         try:
             ConfigStore(config_path).load()
@@ -88,6 +86,25 @@ def diagnostics() -> list[dict[str, object]]:
             results.append(_check("canonical_config", False, f"invalid: {type(exc).__name__}"))
     else:
         results.append(_check("canonical_config", False, f"missing: {config_path} (run setup)"))
+
+    runtime_path = Path(runtime_path) if runtime_path is not None else Path(runtime_config_path())
+    if runtime_path.is_file():
+        try:
+            from .config import ZeroConfig
+
+            ZeroConfig.load(runtime_path)
+        except Exception as exc:
+            results.append(_check("legacy_runtime_config", False, f"invalid: {type(exc).__name__}"))
+        else:
+            results.append(_check("legacy_runtime_config", True, str(runtime_path)))
+    else:
+        results.append(
+            _check(
+                "legacy_runtime_config",
+                False,
+                f"missing: {runtime_path} (configure ZERO_CONFIG_PATH before starting listener or panel)",
+            )
+        )
 
     try:
         sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
@@ -129,11 +146,16 @@ def main(argv: list[str] | None = None) -> int:
         print(VERSION)
         return 0
     if args.command == "status":
-        print(json.dumps({
-            "version": VERSION,
-            "config": str(canonical_config_path()),
-            "runtime_home": str(zero_home()),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "version": VERSION,
+                    "config": str(canonical_config_path()),
+                    "runtime_home": str(zero_home()),
+                },
+                indent=2,
+            )
+        )
         return 0
     if args.command == "doctor":
         checks = diagnostics()
@@ -148,22 +170,59 @@ def main(argv: list[str] | None = None) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             print("zero setup requires an interactive TTY; use `zero tui --print --panel setup` to inspect state.", file=sys.stderr)
             return 2
-        import curses
+        config_path = args.config or canonical_config_path()
+        panel_path = args.panel_db or panel_state_path()
+        try:
+            import curses
+        except ImportError:
+            from .tui import run_console_setup_wizard
+
+            print("zero setup: curses is unavailable; using the portable console wizard.")
+            return (
+                0
+                if run_console_setup_wizard(
+                    config_path=config_path,
+                    panel_path=panel_path,
+                )
+                else 1
+            )
         from .tui import run_setup_wizard
 
-        config_path = args.config or canonical_config_path()
-        panel_path = args.panel_db or (zero_home() / "panel.db")
+        setup_started = False
+
+        def _run_curses_setup(stdscr) -> int:
+            nonlocal setup_started
+            setup_started = True
+            return (
+                0
+                if run_setup_wizard(
+                    stdscr,
+                    config_path=config_path,
+                    panel_path=panel_path,
+                )
+                else 1
+            )
+
         try:
-            return curses.wrapper(lambda stdscr: 0 if run_setup_wizard(
-                stdscr,
-                config_path=config_path,
-                panel_path=panel_path,
-            ) else 1)
+            return curses.wrapper(_run_curses_setup)
         except curses.error as exc:
+            if not setup_started:
+                from .tui import run_console_setup_wizard
+
+                print(f"zero setup: terminal initialization failed: {exc}; using the portable console wizard.", file=sys.stderr)
+                return (
+                    0
+                    if run_console_setup_wizard(
+                        config_path=config_path,
+                        panel_path=panel_path,
+                    )
+                    else 1
+                )
             print(f"zero setup: terminal initialization failed: {exc}", file=sys.stderr)
             return 1
     if args.command == "tui":
         from .tui import main as tui_main
+
         tui_args = []
         if getattr(args, "print", False):
             tui_args.append("--print")
@@ -181,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
             tui_args.append("--no-animation")
         return tui_main(tui_args)
     if args.command == "config" and args.config_command == "show":
-        print(json.dumps(ConfigStore(args.path).load().model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))
+        try:
+            config = ConfigStore(args.path).load()
+        except (OSError, ValueError):
+            print(json.dumps({"error": "configuration validation failed"}))
+            return 1
+        print(json.dumps(config.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True))
         return 0
     return 2

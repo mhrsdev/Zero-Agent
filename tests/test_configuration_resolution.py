@@ -14,6 +14,16 @@ def test_all_composition_roots_use_one_explicit_config_path(monkeypatch, tmp_pat
     assert canonical_config_path() == ConfigStore.default_path()
 
 
+def test_default_canonical_config_path_follows_runtime_home(monkeypatch, tmp_path):
+    monkeypatch.delenv("ZERO_CANONICAL_CONFIG", raising=False)
+    monkeypatch.setenv("ZERO_HOME", str(tmp_path / "runtime-home"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert canonical_config_path() == tmp_path / "runtime-home" / "config" / "zero.json"
+
+
 def test_invalid_config_is_rejected_on_reload(tmp_path):
     path = tmp_path / "canonical.json"
     path.write_text(json.dumps({"installation_id": "x", "unknown": True}), encoding="utf-8")

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from zero.configuration import ConfigStore, SetupService
 from zero.panel_api import PanelAPI
 from zero.panel_store import PanelStore
 
@@ -56,10 +57,110 @@ async def test_local_admin_auth_and_setup_api(tmp_path: Path):
         assert (await client.get("/api/local/setup", headers=headers)).status == 200
         assert (await client.get("/api/router", headers=headers)).status == 200
         assert (await client.get("/api/logs", headers=headers)).status == 200
-        saved = await client.post("/api/local/setup/telegram", headers=headers, json={"mode": "bot", "bot_token": "secret"})
+        saved = await client.post(
+            "/api/local/setup/telegram",
+            headers=headers,
+            json={"mode": "bot", "bot_token_ref": "telegram.bot_token"},
+        )
         assert saved.status == 200
         state = await (await client.get("/api/local/setup", headers=headers)).json()
-        assert state["data"]["telegram"]["bot_token"] == "[stored securely]"
+        assert state["data"]["telegram"]["bot_token_ref"] == "[stored securely]"
         assert (await client.post("/api/local/auth/logout", headers=headers)).status == 200
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_local_setup_api_uses_symbolic_references_and_normalizes_blank_fields(tmp_path: Path):
+    """The production-wired browser payload must advance without raw secrets."""
+    cfg = config(tmp_path)
+    canonical = ConfigStore(tmp_path / "canonical.json")
+    panel_store = PanelStore(
+        tmp_path / "panel.db",
+        setup_service=SetupService(canonical, installation_id="panel-local"),
+    )
+    panel = PanelAPI(cfg, object(), Router(), Bot(), static_dir=tmp_path, panel_store=panel_store)
+    client = TestClient(TestServer(panel.app))
+    await client.start_server()
+    try:
+        bootstrap = await client.post(
+            "/api/local/auth/bootstrap",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        assert bootstrap.status == 201
+        login = await client.post(
+            "/api/local/auth/login",
+            json={"username": "admin", "password": "correct horse battery staple"},
+        )
+        login_body = await login.json()
+        headers = {
+            "X-CSRF-Token": login_body["csrf"],
+            "Cookie": f"zero_admin_session={login.cookies['zero_admin_session'].value}",
+        }
+
+        raw_api_hash = "a" * 32
+        rejected = await client.post(
+            "/api/local/setup/telegram",
+            headers=headers,
+            json={
+                "mode": "user_session",
+                "bot_token_ref": "",
+                "api_id": "1",
+                "api_hash_ref": raw_api_hash,
+                "session_ref": "telegram.session",
+            },
+        )
+        assert rejected.status == 400
+        assert raw_api_hash not in await rejected.text()
+        assert not canonical.path.exists()
+
+        nonpositive = await client.post(
+            "/api/local/setup/telegram",
+            headers=headers,
+            json={
+                "mode": "user_session",
+                "bot_token_ref": "",
+                "api_id": "0",
+                "api_hash_ref": "telegram.api_hash",
+                "session_ref": "telegram.session",
+            },
+        )
+        assert nonpositive.status == 400
+        assert not canonical.path.exists()
+
+        saved = await client.post(
+            "/api/local/setup/telegram",
+            headers=headers,
+            json={
+                "mode": "user_session",
+                "bot_token_ref": "",
+                "api_id": "1",
+                "api_hash_ref": "telegram.api_hash",
+                "session_ref": "telegram.session",
+            },
+        )
+        assert saved.status == 200
+    finally:
+        await client.close()
+
+    persisted = canonical.load()
+    assert persisted.installation_id == "panel-local"
+    assert persisted.telegram.mode == "user_session"
+    assert persisted.telegram.api_id == 1
+    assert persisted.telegram.api_hash_ref == "telegram.api_hash"
+    assert persisted.telegram.session_ref == "telegram.session"
+
+
+def test_panel_setup_frontend_uses_symbolic_telegram_references_only():
+    """Browser setup must match the canonical secret-reference contract."""
+    source = (Path(__file__).resolve().parents[1] / "panel" / "app.js").read_text(encoding="utf-8")
+
+    for field in (
+        'name="mode" value="disabled"',
+        'name="bot_token_ref"',
+        'name="api_hash_ref"',
+        'name="session_ref"',
+    ):
+        assert field in source
+    for raw_field in ('name="bot_token"', 'name="api_hash"', 'name="phone"'):
+        assert raw_field not in source

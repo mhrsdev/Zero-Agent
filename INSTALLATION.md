@@ -28,7 +28,7 @@ Office mode is disabled by default. Enabling it additionally requires:
 ## Supported operating systems
 
 - **Linux:** primary supported deployment target. The source includes Linux-oriented paths, systemd units, and Docker files.
-- **Windows:** the Python commands may be run in a normal Python environment, but the repository does not provide a native Windows service definition. Use WSL2 for the Linux-oriented listener, panel, paths, and optional systemd workflow. Windows/WSL2 live Telegram operation was not verified in this audit.
+- **Windows:** the Python commands may be run in a normal Python environment, and `zero setup` / `zero tui` automatically use a portable line console when Python does not provide `_curses`. The repository does not provide a native Windows service definition; use WSL2 for the Linux-oriented listener, panel, paths, and optional systemd workflow. Windows/WSL2 live Telegram operation was not verified in this audit.
 - **macOS:** manual Python execution may be possible, but the repository does not provide a macOS service definition. Docker Desktop is the only container route described by the repository. macOS live Telegram operation was not verified in this audit.
 
 Do not copy the Linux `/root/zero` paths into Windows or macOS configuration. Set `ZERO_CONFIG_PATH`, `ZERO_HOME`, and the file paths in the YAML config to real paths for the host.
@@ -93,23 +93,25 @@ config/zero.yaml
 
 ### Canonical setup JSON
 
-`zero.configuration.canonical_config_path()` reads `ZERO_CANONICAL_CONFIG`. Its default is:
+`zero.configuration.canonical_config_path()` reads `ZERO_CANONICAL_CONFIG`. When that variable is unset, every CLI/TUI/panel composition root uses the runtime-home default:
 
 ```text
-config/zero.json
+~/.zero/config/zero.json
 ```
 
+On Windows this is normally under `%USERPROFILE%/.zero/config/zero.json`. Set
+`ZERO_CANONICAL_CONFIG` only when deliberately using a different shared path.
 The canonical store writes restrictive permissions and creates a sibling backup:
 
 ```text
-config/zero.json.bak
+~/.zero/config/zero.json.bak
 ```
 
-If a canonical JSON file exists, the runtime validates it before loading the legacy YAML adapter. It does not replace the legacy YAML loader in this alpha commit.
+If a canonical JSON file exists, the runtime validates it before loading the legacy YAML adapter. It does not replace the legacy YAML loader in this alpha commit; configure `~/.zero/config/zero.yaml` (or `ZERO_CONFIG_PATH`) before starting the listener or panel.
 
 ### Runtime data
 
-The exact database and log paths are values in `config/zero.yaml`, including `memory.db_path` and the three log paths. Do not assume that `runtime/` paths in the repository are already populated. Session files, databases, logs, backups, and secrets are local runtime data and must stay out of commits.
+The exact database and log paths are values in the legacy runtime YAML (by default `~/.zero/config/zero.yaml`, or `ZERO_CONFIG_PATH`), including `memory.db_path` and the three log paths. Do not assume that `runtime/` paths in the repository are already populated. Session files, databases, logs, backups, and secrets are local runtime data and must stay out of commits.
 
 ## Required and optional credentials
 
@@ -379,6 +381,7 @@ python -m zero tui --print --panel groups
 python -m zero tui --print --panel backup
 python -m zero tui --print --panel logs --tail 50
 python -m zero tui --print --panel setup
+python -m zero tui --print --panel sessions
 ```
 
 Interactive setup is available either as a standalone command or from the Setup
@@ -389,13 +392,20 @@ python -m zero setup
 python -m zero setup --config /path/to/zero.json --panel-db /path/to/panel.db
 ```
 
+When `_curses` is unavailable (the normal Windows CPython case), `zero setup`
+uses the same line-oriented prompt flow and `zero tui` remains interactive rather
+than printing a status screen once and exiting. In that portable console use
+`1`–`8` or a panel name to navigate, `setup` to launch the wizard, `chat <prompt>`
+to send a message, `r` to refresh or create a backup from the Backup panel, and
+`q`/`quit` to exit.
+
 The wizard writes canonical JSON atomically through `SetupService`, records
 progress in `PanelStore`, validates Telegram mode requirements, and accepts
 only symbolic references such as `telegram.bot_token`. Put actual values in
 the protected secret store described above; raw credentials are never entered
 into the TUI.
 
-TUI controls: `1`–`7` select panels; `Tab`, `←`, and `→` navigate; `↑`, `↓`,
+TUI controls: `1`–`8` select panels; `Tab`, `←`, and `→` navigate; `↑`, `↓`,
 `j`, and `k` scroll; `PageUp`, `PageDown`, `Home`, and `End` move through long
 panels; `r` refreshes; `Enter` starts setup from the Setup panel; and `q` or
 `Esc` exits. Interactive redraws are read-only. Backup creation happens only
@@ -457,16 +467,16 @@ There is no generic upgrade subcommand. For this HEAD:
 
 - storage and Office schema setup is additive/idempotent during initialization;
 - Memory V1→V3 has `--dry-run`, `--apply`, `--verify`, and `--rollback`;
-- canonical JSON saves create `config/zero.json.bak`, and `ConfigStore.rollback()` restores that backup;
+- canonical JSON saves create `~/.zero/config/zero.json.bak` by default, and `ConfigStore.rollback()` restores that backup;
 - a deployment rollback should normally restore the verified pre-change database/config backup and restart the affected services.
 
 For Linux units, the repository names include `zero-listener.service`, `zero-panel.service`, and optional `zero-office-worker.service`. Their embedded `/root/zero` paths are deployment-specific and must not be copied unchanged to another host.
 
 ## Troubleshooting common errors
 
-### `canonical_config: missing`
+### `canonical_config: missing` or `legacy_runtime_config: missing`
 
-`python -m zero doctor` is looking for `ZERO_CANONICAL_CONFIG` or its default `config/zero.json`. Either complete canonical setup at that path or understand that the legacy listener/panel still require the YAML adapter separately.
+`python -m zero doctor` checks both configuration layers without contacting Telegram or a provider. It looks for `ZERO_CANONICAL_CONFIG` or the default `~/.zero/config/zero.json`, plus `ZERO_CONFIG_PATH` or the default `~/.zero/config/zero.yaml`. Complete canonical setup at the shared path and configure the legacy YAML adapter before starting the listener or panel.
 
 ### `protected secret file is required`
 

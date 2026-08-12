@@ -10,6 +10,8 @@ Verifies the TUI:
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -101,6 +103,56 @@ class TestTUISetupState:
         assert state["telegram_configured"] is True
         assert "bot_token" not in str(state)
 
+    def test_setup_render_does_not_echo_malformed_config_values(self, tmp_path):
+        from zero.tui import _setup_state, render_setup
+
+        marker = "DO_NOT_ECHO_THIS_INVALID_VALUE"
+        config = tmp_path / "zero.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "installation_id": "x",
+                    "telegram": {
+                        "mode": "user_session",
+                        "api_id": marker,
+                        "api_hash_ref": "telegram.api_hash",
+                        "session_ref": "telegram.session",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        rendered = "\n".join(render_setup(config_path=config))
+        state = _setup_state(config, tmp_path / "missing-panel.db")
+
+        assert marker not in rendered
+        assert marker not in str(state)
+        assert "Config load error: configuration validation failed" in rendered
+        assert state["error"] == "canonical configuration validation failed"
+
+    def test_setup_render_does_not_echo_panel_state_error_detail(self, tmp_path, monkeypatch):
+        import zero.panel_store as panel_store
+        from zero.tui import _setup_state, render_setup
+
+        marker = "DO_NOT_ECHO_THIS_PANEL_ERROR"
+        home = tmp_path / "home"
+        monkeypatch.setenv("ZERO_HOME", str(home))
+        panel_db = home / "panel.db"
+        panel_store.PanelStore(panel_db)
+
+        def fail(_self):
+            raise ValueError(marker)
+
+        monkeypatch.setattr(panel_store.PanelStore, "get_setup_state", fail)
+        rendered = "\n".join(render_setup(config_path=tmp_path / "missing.json"))
+        state = _setup_state(tmp_path / "missing.json", panel_db)
+
+        assert marker not in rendered
+        assert marker not in str(state)
+        assert "Panel state error: local state validation failed" in rendered
+        assert state["error"] == "panel state validation failed"
+
     def test_setup_wizard_persists_canonical_state_without_raw_secrets(self, tmp_path, monkeypatch):
         import zero.tui as tui
 
@@ -135,6 +187,77 @@ class TestTUISetupState:
         assert state.config.installation_id == "community"
         assert "profile" in state.completed_steps
         assert store.load().installation_id == "community"
+
+    def test_curses_setup_hides_reference_prompts(self, tmp_path, monkeypatch):
+        import zero.tui as tui
+
+        answers = {
+            "Installation id": "test-installation",
+            "Telegram mode (disabled/bot/user_session/hybrid)": "bot",
+            "Bot token reference": "telegram.bot_token",
+        }
+        calls: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            tui,
+            "_curses_prompt",
+            lambda _stdscr, prompt, **kwargs: calls.append((prompt, kwargs)) or answers[prompt],
+        )
+        monkeypatch.setattr(tui, "_curses_message", lambda *_args, **_kwargs: None)
+
+        assert tui.run_setup_wizard(object(), config_path=tmp_path / "zero.json", panel_path=tmp_path / "panel.db")
+        assert {prompt for prompt, kwargs in calls if kwargs.get("secret")} == {"Installation id", "Bot token reference"}
+
+    def test_curses_setup_does_not_echo_malformed_config_values(self, tmp_path, monkeypatch):
+        import zero.tui as tui
+
+        marker = "DO_NOT_ECHO_THIS_INVALID_VALUE"
+        config = tmp_path / "zero.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "installation_id": "x",
+                    "telegram": {
+                        "mode": "user_session",
+                        "api_id": marker,
+                        "api_hash_ref": "telegram.api_hash",
+                        "session_ref": "telegram.session",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        messages: list[str] = []
+        monkeypatch.setattr(tui, "_curses_message", lambda _stdscr, lines, **_kwargs: messages.extend(lines))
+
+        assert not tui.run_setup_wizard(object(), config_path=config, panel_path=tmp_path / "panel.db")
+        assert marker not in "\n".join(messages)
+        assert "Configuration or storage validation failed" in "\n".join(messages)
+
+    def test_curses_setup_cancellation_leaves_existing_state_untouched(self, tmp_path, monkeypatch):
+        import zero.tui as tui
+        from zero.configuration import ConfigStore
+
+        config = tmp_path / "zero.json"
+        panel = tmp_path / "panel.db"
+        store = ConfigStore(config)
+        store.save(store.new_config("original-installation"))
+        prompts = iter(["replacement-installation", KeyboardInterrupt()])
+        messages: list[str] = []
+
+        def cancel_at_mode(*_args, **_kwargs):
+            value = next(prompts)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        monkeypatch.setattr(tui, "_curses_prompt", cancel_at_mode)
+        monkeypatch.setattr(tui, "_curses_message", lambda _stdscr, lines, **_kwargs: messages.extend(lines))
+
+        assert not tui.run_setup_wizard(object(), config_path=config, panel_path=panel)
+        assert store.load().installation_id == "original-installation"
+        assert not store.backup_path.exists()
+        assert not panel.exists()
+        assert "Setup cancelled" in "\n".join(messages)
 
 
 class TestTUIWiredIntoCLI:
@@ -285,6 +408,42 @@ class TestTUIPanels:
             assert any(l.strip().startswith("✓") or l.strip().startswith("✗")
                        for l in lines)
 
+    def test_render_doctor_panel_uses_explicit_runtime_config(self, tmp_path, monkeypatch):
+        from zero import tui
+
+        canonical = tmp_path / "zero.json"
+        runtime = tmp_path / "chosen-runtime.yaml"
+        fallback = tmp_path / "fallback-runtime.yaml"
+        canonical.write_text('{"schema_version": 1, "installation_id": "test", "telegram": {"mode": "disabled"}}', encoding="utf-8")
+        runtime.write_text(
+            (Path(__file__).resolve().parents[1] / "config" / "zero.example.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ZERO_CONFIG_PATH", str(fallback))
+
+        lines = tui.render_doctor(config_path=canonical, runtime_path=runtime)
+        text = "\n".join(lines)
+        assert str(runtime) in text
+        assert str(fallback) not in text
+
+    def test_print_doctor_panel_uses_explicit_runtime_config(self, tmp_path, monkeypatch, capsys):
+        from zero import tui
+
+        canonical = tmp_path / "zero.json"
+        runtime = tmp_path / "chosen-runtime.yaml"
+        fallback = tmp_path / "fallback-runtime.yaml"
+        canonical.write_text('{"schema_version": 1, "installation_id": "test", "telegram": {"mode": "disabled"}}', encoding="utf-8")
+        runtime.write_text(
+            (Path(__file__).resolve().parents[1] / "config" / "zero.example.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ZERO_CONFIG_PATH", str(fallback))
+
+        assert tui.main(["--print", "--panel", "doctor", "--config", str(canonical), "--runtime-config", str(runtime)]) == 0
+        text = capsys.readouterr().out
+        assert str(runtime) in text
+        assert str(fallback) not in text
+
     # ------------------------------------------------------------------
     # Groups panel
     # ------------------------------------------------------------------
@@ -329,6 +488,26 @@ class TestTUIPanels:
     # Backup panel
     # ------------------------------------------------------------------
 
+    def test_print_backup_panel_does_not_create_a_backup(self, tmp_path, monkeypatch):
+        """Printing a panel reports state; only the explicit interactive action writes."""
+        import zero.tui as tui
+
+        home = tmp_path / "home"
+        monkeypatch.setenv("ZERO_HOME", str(home))
+        db = tmp_path / "zero.db"
+        with sqlite3.connect(db) as connection:
+            connection.execute("CREATE TABLE settings (key TEXT, value TEXT)")
+            connection.execute("INSERT INTO settings VALUES ('k', 'v')")
+
+        from zero.tui import render_backup
+
+        lines = render_backup(store_path=db)
+        assert any("No backup has been created yet" in line for line in lines)
+        assert not list((home / "backups").glob("zero-*.db"))
+
+        assert tui.main(["--print", "--panel", "backup", "--store", str(db)]) == 0
+        assert not list((home / "backups").glob("zero-*.db"))
+
     def test_render_backup_panel(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ZERO_HOME", str(tmp_path / "home"))
         # Create a real store DB with some content.
@@ -343,7 +522,7 @@ class TestTUIPanels:
         conn.close()
 
         from zero.tui import render_backup
-        lines = render_backup(store_path=db)
+        lines = render_backup(store_path=db, create=True)
         text = "\n".join(lines)
         assert "Zero Backup" in text
         assert "SUCCESS" in text
@@ -357,6 +536,22 @@ class TestTUIPanels:
         assert chk.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 1
         assert chk.execute("SELECT COUNT(*) FROM office_jobs").fetchone()[0] == 1
         chk.close()
+        if os.name != "nt":
+            assert backup_path.stat().st_mode & 0o077 == 0
+            assert backup_path.parent.stat().st_mode & 0o077 == 0
+
+    def test_failed_backup_removes_partial_database(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZERO_HOME", str(tmp_path / "home"))
+        source = tmp_path / "not-a-sqlite-database"
+        source.write_text("not a sqlite database", encoding="utf-8")
+
+        from zero.tui import render_backup
+
+        lines = render_backup(store_path=source, create=True)
+        assert any("Backup: FAILED" in line for line in lines)
+        backup_dir = tmp_path / "home" / "backups"
+        assert not list(backup_dir.glob("zero-*.db"))
+        assert not list(backup_dir.glob(".zero-backup-*.db"))
 
     def test_render_backup_panel_missing_db(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ZERO_HOME", str(tmp_path / "home"))
