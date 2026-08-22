@@ -174,6 +174,25 @@ python -m pip install -r requirements.txt
 The repository contains a pinned two-stage Dockerfile, an unprivileged `zero` user, a read-only filesystem, a `/data` volume, a health check at `/api/health`, and Compose services `zero-panel` and `zero-listener`.
 
 **Important:** the current Compose setup requires both configuration layers: canonical JSON at `/data/config/zero.json` and legacy YAML selected through `ZERO_CONFIG_PATH`. The Compose file does not provision the legacy YAML path itself. Docker build/run was not locally verified in the audit environment, so Compose must not be treated as a turnkey installation until both layers are provisioned and the path boundary is resolved. See [`INSTALLATION.md`](INSTALLATION.md).
+## Automation controls (kill switch / observe mode)
+
+Every autonomous action — emoji reactions, autonomous interjection, and
+proactive follow-up messages — passes through a shared gate in
+[`zero/automation.py`](zero/automation.py):
+
+| Control | Effect |
+| --- | --- |
+| `ZERO_AUTOMATION_DISABLED=true` (env) | Emergency stop: no reactions, no interjections, no proactive sends. Checked before any DB access. |
+| `automation_enabled=false` setting | Same stop, persisted; editable from the panel (`POST /api/settings/automation_enabled`). |
+| `ZERO_PROACTIVE_OBSERVE_ONLY=true` (env) | Observe mode: the proactive pipeline computes and logs each decision (`action=observe`, `would_send=true`) but postpones the candidate instead of sending. |
+
+The kill switch fails open on storage errors: an operator must explicitly turn
+automation off, and a transient DB failure never silently changes behaviour.
+Decisions are auditable in the logs (`AUTOMATION_KILLED`, `PROACTIVE_OBSERVE`,
+`REACTION_DECISION`, `REACTION_SKIPPED`). See
+[`tests/test_automation_switch.py`](tests/test_automation_switch.py) for the
+guaranteed behaviour.
+
 ## Health checks
 
 ```bash
