@@ -94,14 +94,62 @@ def test_observe_mode_parsing(monkeypatch):
     assert observe_only() is True
 
 
-def test_automation_disabled_setting_and_fail_open(tmp_path: Path):
+def test_automation_disabled_setting_values(tmp_path: Path):
     async def scenario():
         store = ZeroStore(str(tmp_path / "zero.db"))
+        # Unset -> fresh-install default stays enabled.
         assert await automation_disabled(store) is None
+        # Explicit disabled blocks.
         await store.set_setting(SETTING_KEY, "false")
         assert await automation_disabled(store) == "setting_disabled"
+        # Explicit enabled allows.
         await store.set_setting(SETTING_KEY, "true")
         assert await automation_disabled(store) is None
+
+    asyncio.run(scenario())
+
+
+def test_automation_disabled_invalid_value_blocks(tmp_path: Path, caplog):
+    async def scenario():
+        store = ZeroStore(str(tmp_path / "zero.db"))
+        await store.set_setting(SETTING_KEY, "maybe")
+        with caplog.at_level("WARNING", logger="zero.automation"):
+            reason = await automation_disabled(store)
+        assert reason == "setting_invalid"
+        assert any("AUTOMATION_SWITCH_INVALID_VALUE" in r.message for r in caplog.records)
+
+    asyncio.run(scenario())
+
+
+def test_automation_disabled_read_error_blocks(tmp_path: Path):
+    class BrokenStore:
+        async def get_setting(self, key):
+            raise RuntimeError("db locked")
+
+    async def scenario():
+        reason = await automation_disabled(BrokenStore())
+        assert reason == "setting_read_error"
+
+    asyncio.run(scenario())
+
+
+def test_reaction_service_blocks_on_read_error(tmp_path: Path):
+    """Action-time switch failure must prevent sending (fail-closed)."""
+    class BrokenStore(ZeroStore):
+        async def get_setting(self, key, *a, **kw):
+            if key == SETTING_KEY:
+                raise RuntimeError("db locked")
+            return await super().get_setting(key, *a, **kw)
+
+    async def scenario():
+        store = BrokenStore(str(tmp_path / "zero.db"))
+        config = SimpleNamespace(owner_user_id=1, reactions=ReactionsConfig())
+        client = FakeClient()
+        service = ReactionService(config, store, client, self_id=2)
+        decision = await service.maybe_react(FakeEvent(), _msg("جوک خنده‌دار 😂"))
+        assert decision.should_react is False
+        assert decision.skipped_reason == "kill_switch"
+        assert client.calls == []
 
     asyncio.run(scenario())
 

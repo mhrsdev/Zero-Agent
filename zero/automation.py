@@ -3,13 +3,22 @@
 Two independent controls:
 
 * Kill switch -- ``ZERO_AUTOMATION_DISABLED=true`` env var or the persisted
-  ``automation_enabled=false`` setting stops ALL autonomous actions immediately.
+  ``automation_enabled`` setting stops ALL autonomous actions immediately.
   This is the emergency stop required for incident response.
 * Observe mode -- ``ZERO_PROACTIVE_OBSERVE_ONLY=true`` lets the proactive
   pipeline compute and log decisions without ever sending a message.
 
-The kill switch fails open on storage errors: an operator must explicitly turn
-it off; a transient DB failure must not silently change behaviour.
+Kill-switch semantics are fail-closed. ``automation_disabled`` returns a
+reason string (meaning "block") unless the setting is *explicitly* enabled:
+
+* explicit enabled value  -> ``None`` (normal operation)
+* explicit disabled value -> ``"setting_disabled"``
+* missing/empty setting   -> ``None`` (fresh installs default to enabled)
+* invalid setting value   -> ``"setting_invalid"`` + warning (conservative)
+* storage read error      -> ``"setting_read_error"`` (block until recovery)
+
+An operator must therefore explicitly enable automation after an incident;
+ambiguity or infrastructure failure never silently re-enables sending.
 """
 from __future__ import annotations
 
@@ -31,8 +40,26 @@ def _flag(value: str | None) -> bool:
 
 
 def kill_switch_active() -> bool:
-    """Env-level kill switch; checked first so it works even before DB access."""
-    return _flag(os.getenv(KILL_ENV))
+    """Env-level kill switch; checked first so it works even before DB access.
+
+    Fail-closed on ambiguity: an explicitly-set but unrecognisable value
+    (e.g. ``ZERO_AUTOMATION_DISABLED=maybe``) BLOCKS autonomous actions --
+    an operator who typed something unexpected meant to stop things, not to
+    silently re-enable them.
+    """
+    raw = os.getenv(KILL_ENV)
+    if raw is None or not raw.strip():
+        return False
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    logger.warning(
+        "AUTOMATION_KILL_ENV_INVALID value_class=%s action=conservative_block",
+        type(raw).__name__,
+    )
+    return True
 
 
 def observe_only() -> bool:
@@ -41,16 +68,31 @@ def observe_only() -> bool:
 
 
 async def automation_disabled(store: Any = None) -> str | None:
-    """Return a reason string when autonomous actions must stop, else ``None``."""
+    """Return a reason string when autonomous actions must stop, else ``None``.
+
+    Fail-closed: any ambiguity or read failure blocks autonomous actions.
+    """
     if kill_switch_active():
         return "env_kill_switch"
     if store is None:
         return None
     try:
         value = await store.get_setting(SETTING_KEY)
-    except Exception as exc:  # fail open: operator must opt out explicitly
-        logger.warning("AUTOMATION_SWITCH_READ_FAILED exception_type=%s", type(exc).__name__)
-        return None
-    if value is not None and str(value).strip().lower() in _FALSY:
+    except Exception as exc:
+        logger.warning(
+            "AUTOMATION_SWITCH_READ_FAILED exception_type=%s action=block_until_recovery",
+            type(exc).__name__,
+        )
+        return "setting_read_error"
+    if value is None or str(value).strip() == "":
+        return None  # unset: fresh-install default is enabled
+    normalized = str(value).strip().lower()
+    if normalized in _FALSY:
         return "setting_disabled"
-    return None
+    if normalized in _TRUTHY:
+        return None
+    logger.warning(
+        "AUTOMATION_SWITCH_INVALID_VALUE value_class=%s action=conservative_block",
+        type(value).__name__,
+    )
+    return "setting_invalid"
