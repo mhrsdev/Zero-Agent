@@ -1,3 +1,4 @@
+from zero.sqlite_tx import sqlite_txn
 from conftest import CONFIG_EXAMPLE
 import asyncio
 from pathlib import Path
@@ -129,7 +130,7 @@ def test_recent_since_keeps_human_and_bot_messages_inside_window(tmp_path):
     async def scenario():
         store = ZeroStore(str(tmp_path / 'window.db'), recent_messages_limit=20)
         async with store._lock:
-            with store._conn() as conn:
+            with sqlite_txn(store._conn()) as conn:
                 conn.executemany(
                     'INSERT INTO recent_messages(chat_id,sender_id,sender_label,role,text,created_at) VALUES(?,?,?,?,?,?)',
                     [
@@ -164,7 +165,7 @@ def test_daily_summary_prompt_uses_window_and_includes_bot_messages(tmp_path):
         config = config.model_copy(update={'memory': config.memory.model_copy(update={'db_path': str(tmp_path / 'brain-summary.db')})})
         store = ZeroStore(config.memory.db_path, recent_messages_limit=20)
         async with store._lock:
-            with store._conn() as conn:
+            with sqlite_txn(store._conn()) as conn:
                 conn.executemany(
                     'INSERT INTO recent_messages(chat_id,sender_id,sender_label,role,text,created_at) VALUES(?,?,?,?,?,?)',
                     [

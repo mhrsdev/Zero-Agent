@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from zero.config import ZeroConfig
+from zero.fsprivacy import path_is_private, restrict_private_path
 from zero.logging_utils import setup_logger
 from zero.management import load_bot_token
 from zero.runtime_control import stop_listener
@@ -50,7 +51,9 @@ def _secret_file(tmp_path: Path) -> Path:
         ),
         encoding="utf-8",
     )
-    os.chmod(secret, 0o600)
+    # Cross-platform: strip inherited/extra ACL entries; POSIX chmod cannot
+    # remove NTFS inheritance on Windows.
+    restrict_private_path(secret)
     return secret
 
 
@@ -69,11 +72,14 @@ def test_config_loads_credentials_from_protected_secret_file(tmp_path, monkeypat
 
 def test_config_rejects_group_or_world_readable_secret_file(tmp_path, monkeypatch):
     public = _public_config(tmp_path)
-    secret = _secret_file(tmp_path)
-    os.chmod(secret, 0o640)
+    secret = tmp_path / "zero.secrets.yaml"
+    secret.write_text("listener: {telegram_api_hash: x}", encoding="utf-8")
+    if path_is_private(secret):  # pragma: no cover - restrictive umask systems
+        os.chmod(secret, 0o640)
+        assert not path_is_private(secret)
     monkeypatch.setenv("ZERO_SECRET_FILE", str(secret))
 
-    with pytest.raises(PermissionError, match="secret file permissions"):
+    with pytest.raises(PermissionError, match="secret file"):
         ZeroConfig.load(public)
 
 
@@ -88,9 +94,11 @@ def test_owner_commands_require_private_chat():
 def test_bot_token_file_requires_private_permissions(tmp_path):
     token_file = tmp_path / "bot.env"
     token_file.write_text("BOT_TOKEN=token-value\n", encoding="utf-8")
-    os.chmod(token_file, 0o640)
+    if path_is_private(token_file):  # pragma: no cover - restrictive umask systems
+        os.chmod(token_file, 0o640)
+        assert not path_is_private(token_file)
 
-    with pytest.raises(PermissionError, match="bot token file permissions"):
+    with pytest.raises(PermissionError, match="bot token file"):
         load_bot_token(str(token_file))
 
 
@@ -113,8 +121,8 @@ def test_logger_creates_private_directory_and_file(tmp_path):
     logger = setup_logger(f"test.private.{tmp_path.name}", str(log_path))
     logger.info("safe")
 
-    assert (log_path.parent.stat().st_mode & 0o777) == 0o700
-    assert (log_path.stat().st_mode & 0o777) == 0o600
+    assert path_is_private(log_path.parent)
+    assert path_is_private(log_path)
 
 
 def test_systemd_units_drop_privileges_and_isolate_runtime():
@@ -147,5 +155,5 @@ def test_store_restricts_database_and_parent_permissions(tmp_path):
 
     ZeroStore(str(db))
 
-    assert (state.stat().st_mode & 0o777) == 0o700
-    assert (db.stat().st_mode & 0o777) == 0o600
+    assert path_is_private(state)
+    assert path_is_private(db)

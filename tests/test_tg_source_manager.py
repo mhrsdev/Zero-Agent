@@ -12,8 +12,9 @@ def test_extract_and_merge_public_links():
 
 
 def test_state_files_are_private(tmp_path):
+    from zero.fsprivacy import path_is_private
     m = TelegramSourceManager(object(), tmp_path/'manifest.json', tmp_path/'state.json')
     m.save_manifest([{'username': 'example'}])
     m.save_state({'joined': {}})
-    assert oct((tmp_path/'manifest.json').stat().st_mode & 0o777) == '0o600'
-    assert oct((tmp_path/'state.json').stat().st_mode & 0o777) == '0o600'
+    assert path_is_private(tmp_path / 'manifest.json')
+    assert path_is_private(tmp_path / 'state.json')

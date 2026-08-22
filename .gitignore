@@ -72,3 +72,4 @@ scripts/tg_source_manager.py
 scripts/sticker_prototype.py
 scripts/reaction_prototype.py
 sbom.cdx.json
+"*.txt"  

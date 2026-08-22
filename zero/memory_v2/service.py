@@ -151,5 +151,11 @@ class MemoryV2Service:
         rows=[r for r in recent[-max(0,limit):] if len(str(r.get('text','')))<=1200 and r.get('role') in {'user','assistant'}]
         return [{'sender_id':message.sender_id,'message_id':message.message_id,'text':message.text,'current':True},*rows]
     async def metric(self,trace_id:str,kind:str,payload:dict):
-        try: await asyncio.to_thread(lambda: self._conn().execute('INSERT INTO memory_v2_metrics VALUES(?,?,?,?)',(trace_id,kind,json.dumps(payload),time.time())))
+        def _metric():
+            c = self._conn()
+            try:
+                with c: c.execute('INSERT INTO memory_v2_metrics VALUES(?,?,?,?)', (trace_id, kind, json.dumps(payload), time.time()))
+            finally:
+                c.close()
+        try: await asyncio.to_thread(_metric)
         except Exception: pass

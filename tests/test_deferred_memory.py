@@ -1,3 +1,4 @@
+from zero.sqlite_tx import sqlite_txn
 from datetime import datetime
 from pathlib import Path
 
@@ -76,5 +77,5 @@ async def test_explicit_reminder_is_not_claimed_by_proactive_scheduler(tmp_path:
             return RouteResult(json.dumps({'version':1,'action':'postpone','confidence':.9,'postpone_hours':2,'reason_code':'x'}),'x','x',1)
 
     assert await ProactiveFollowups(store, Router()).tick('test') == []
-    with store._conn() as conn:
+    with sqlite_txn(store._conn()) as conn:
         assert conn.execute('SELECT state FROM cron_jobs WHERE job_id=?',(job_id,)).fetchone()[0] == 'enabled'

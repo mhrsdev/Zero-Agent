@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from zero.fsprivacy import path_is_private
 from zero.storage import ZeroStore
 
 
@@ -17,10 +18,23 @@ def test_store_allows_database_in_writable_unowned_parent_without_chmodding_pare
     db = parent / f"zero-store-{os.getpid()}-{uuid.uuid4().hex}.db"
     try:
         store = ZeroStore(str(db))
-        with store._conn() as conn:
+        conn = store._conn()
+        try:
             assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert stat.S_IMODE(db.stat().st_mode) == 0o600
+        finally:
+            conn.close()
+        assert path_is_private(db)
         assert stat.S_IMODE(parent.stat().st_mode) == before_mode
     finally:
+        import gc
+        import time
+
+        gc.collect()
         for candidate in (db, Path(f"{db}-wal"), Path(f"{db}-shm")):
-            candidate.unlink(missing_ok=True)
+            for attempt in range(3):
+                try:
+                    candidate.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    # Transient Windows AV/indexer locks on freshly written files.
+                    time.sleep(0.2 * (attempt + 1))

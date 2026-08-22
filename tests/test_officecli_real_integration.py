@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,12 @@ from zero.office.preflight import inspect_ooxml
 from zero.office.workspace import create_workspace
 
 
-CLI = Path("/usr/local/lib/zero-office/officecli")
+CLI = Path(os.environ.get("ZERO_OFFICECLI_PATH", "/usr/local/lib/zero-office/officecli"))
+
+pytestmark = pytest.mark.skipif(
+    not (CLI.exists() and os.access(CLI, os.X_OK)),
+    reason="officecli binary not built/installed on this machine (set ZERO_OFFICECLI_PATH)",
+)
 
 
 def adapter(tmp_path, job):

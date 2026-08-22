@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .sqlite_tx import sqlite_txn
 import asyncio,json,os,re,time,uuid
 from .proactive_feedback import FeedbackService
 from .proactive_outcome import OutcomeDetector
@@ -12,7 +13,7 @@ class ProactiveFollowups:
  def __init__(self,store,router,transport=None,client=None):
   self.store,self.router=store,router;self._schema();self.feedback=FeedbackService(store,router);self.policy=PolicyEngine(store);self.outcomes=OutcomeDetector(store,router);self.rollout=RolloutController(store);self.rollout_enforced=transport is None;self.transport=transport or select_transport(client);self.outbox=Outbox(store);self.scheduler=SchedulerIntelligence(store,self.outbox);self.production_health=ProactiveProductionHealth(store,self.rollout,self.transport)
  def _schema(self):
-  with self.store._conn() as c:
+  with sqlite_txn(self.store._conn()) as c:
    c.execute("CREATE TABLE IF NOT EXISTS proactive_followups(id TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,subject_user_id INTEGER NOT NULL,source_message_id INTEGER,created_at INTEGER,due_at INTEGER,follow_up_type TEXT,topic_summary TEXT,goal TEXT,priority TEXT,sensitivity TEXT,confidence REAL,status TEXT,last_evaluated_at INTEGER,evaluation_count INTEGER DEFAULT 0,sent_at INTEGER,resolved_at INTEGER,cancel_reason TEXT,dedup_key TEXT UNIQUE,version INTEGER DEFAULT 1,claim_at INTEGER,lease_until INTEGER,worker_id TEXT)")
    cols={r[1] for r in c.execute('pragma table_info(proactive_followups)')}
    for name in ('claim_at','lease_until','worker_id','send_reserved_at','send_lease_until','send_worker_id','send_attempt_count','send_state','final_message_hash','last_send_error_code'):
@@ -32,7 +33,7 @@ class ProactiveFollowups:
   if deadline_hours is not None and deadline_hours<=6:priority='critical'
   now=int(time.time());deadline_at=now+deadline_hours*3600 if deadline_hours is not None else None;key=f'{message.chat_id}:{message.sender_id}:{typ}:{topic.casefold()}'
   def put():
-   with self.store._conn() as c:
+   with sqlite_txn(self.store._conn()) as c:
     if c.execute("select 1 from proactive_followups where dedup_key=? and status in ('pending','postponed','evaluating')",(key,)).fetchone():return False
     c.execute("insert into proactive_followups(id,chat_id,subject_user_id,source_message_id,created_at,due_at,deadline_at,timezone,follow_up_type,topic_summary,goal,priority,sensitivity,confidence,status,dedup_key) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(str(uuid.uuid4()),message.chat_id,message.sender_id,message.message_id,now,now+delay*3600,deadline_at,'UTC',typ,topic,goal,priority,d.get('sensitivity','normal'),conf,'pending',key));return True
   return {'created':await asyncio.to_thread(put),'type':typ,'latency_ms':lat}
@@ -73,7 +74,7 @@ class ProactiveFollowups:
       await asyncio.to_thread(self.scheduler.policy_postpone,row['id'],now+3600,'rollout_gate',now);out.append({'action':'postpone','would_send':False,'id':row['id'],'outcome_status':outcome.status,'reason':rollout_decision.reason});continue
     key=await asyncio.to_thread(self.outbox.reserve,row['id'],worker,now,installation_id=str(row.get('installation_id','') or 'inst'),group_id=str(row.get('group_id','') or 'group'))
     if not key:
-     with self.store._conn() as conn:state=conn.execute("SELECT send_state FROM proactive_followup_outbox WHERE candidate_id=?",(row['id'],)).fetchone()
+     with sqlite_txn(self.store._conn()) as conn:state=conn.execute("SELECT send_state FROM proactive_followup_outbox WHERE candidate_id=?",(row['id'],)).fetchone()
      if state and state[0]=='ambiguous':await asyncio.to_thread(self.scheduler.cancel,row['id'],'outbox_ambiguous',now,status='blocked')
      out.append({'action':'blocked','would_send':False,'id':row['id'],'outcome_status':outcome.status,'reason':'outbox_unavailable'});continue
     try:generated=await self.router.complete('Write one short casual follow-up; no claim beyond goal. goal='+row['goal'],max_output_tokens=80)
@@ -86,7 +87,7 @@ class ProactiveFollowups:
      self.policy.record(row,'sent',now)
      if str(result.receipt or '').startswith('mock:'):await asyncio.to_thread(self.scheduler.policy_postpone,row['id'],now+24*3600,'mock_would_send',now)
      else:
-      with self.store._conn() as conn:conn.execute("UPDATE proactive_followups SET status='sent',sent_at=?,lease_until=NULL,worker_id=NULL,next_retry_at=NULL WHERE id=? AND worker_id=?",(now,row['id'],worker))
+      with sqlite_txn(self.store._conn()) as conn:conn.execute("UPDATE proactive_followups SET status='sent',sent_at=?,lease_until=NULL,worker_id=NULL,next_retry_at=NULL WHERE id=? AND worker_id=?",(now,row['id'],worker))
      out.append({'action':'send','would_send':True,'id':row['id'],'outcome_status':outcome.status,'reason':'sent'})
     elif result.retryable:
      retry_at=await asyncio.to_thread(self.scheduler.technical_failure,row['id'],result.error_code or 'transport_transient',now);out.append({'action':'retry' if retry_at else 'failed','would_send':True,'id':row['id'],'outcome_status':outcome.status,'reason':'transport_retry'})

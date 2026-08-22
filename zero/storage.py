@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import asyncio
 from datetime import datetime, timezone
 import json
@@ -7,12 +9,13 @@ import logging
 import os
 import re
 import sqlite3
-import stat
 import time
 import uuid
 
 from pathlib import Path
 from typing import Any
+
+from .fsprivacy import restrict_private_path
 
 logger = logging.getLogger('zero.storage')
 
@@ -595,17 +598,34 @@ class ZeroStore:
         parent_preexisted = self.db_path.parent.exists()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         geteuid = getattr(os, "geteuid", None)
-        if not parent_preexisted or (geteuid is not None and self.db_path.parent.stat().st_uid == geteuid()):
-            os.chmod(self.db_path.parent, 0o700)
+        owned = geteuid is not None and self.db_path.parent.stat().st_uid == geteuid()
+        if not parent_preexisted or owned or self._parent_is_dedicated():
+            # Only harden a parent this process created, owns, or that is a
+            # dedicated state directory; never weaken a shared directory.
+            try:
+                restrict_private_path(self.db_path.parent, directory=True)
+            except PermissionError:
+                logger.warning("could not restrict database parent permissions: %s", self.db_path.parent)
         self._restrict_db_permissions()
         self._lock = asyncio.Lock()
         self._init_db()
         self._restrict_db_permissions()
 
+    def _parent_is_dedicated(self) -> bool:
+        """True when the parent holds nothing but this database's own files."""
+        reserved = {self.db_path.name, f"{self.db_path.name}-wal", f"{self.db_path.name}-shm", f"{self.db_path.name}-journal"}
+        try:
+            return all(entry.name in reserved for entry in self.db_path.parent.iterdir())
+        except OSError:
+            return False
+
     def _restrict_db_permissions(self) -> None:
         for path in (self.db_path, Path(f'{self.db_path}-wal'), Path(f'{self.db_path}-shm')):
             if path.exists():
-                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                try:
+                    restrict_private_path(path)
+                except PermissionError:
+                    logger.warning("could not restrict database file permissions: %s", path)
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -615,8 +635,19 @@ class ZeroStore:
         conn.execute('PRAGMA busy_timeout=5000')
         return conn
 
+    @contextmanager
+    def _session_ctx(self):
+        """Transaction scope that also closes the connection (sqlite3 `with` does not)."""
+        conn = self._conn()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+
     def _init_db(self) -> None:
-        with self._conn() as conn:
+        with self._session_ctx() as conn:
             conn.executescript(SCHEMA)
             legacy_profiles = int(conn.execute('SELECT COUNT(*) AS c FROM user_profiles').fetchone()['c'])
             if legacy_profiles:
@@ -669,13 +700,13 @@ class ZeroStore:
 
     async def github_trending_seen(self, repo_full_name: str) -> bool:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return conn.execute('SELECT 1 FROM github_trending_items WHERE repo_full_name=? AND last_introduced_at IS NOT NULL', (repo_full_name,)).fetchone() is not None
 
     async def github_trending_mark(self, repo_full_name: str, *, rank: int, fingerprint: str, source_url: str) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('''INSERT INTO github_trending_items(repo_full_name,last_seen_rank,last_seen_fingerprint,last_introduced_at,intro_count,last_source_url,created_at,updated_at)
                     VALUES(?,?,?,?,1,?,?,?)
                     ON CONFLICT(repo_full_name) DO UPDATE SET last_seen_rank=excluded.last_seen_rank,last_seen_fingerprint=excluded.last_seen_fingerprint,last_introduced_at=excluded.last_introduced_at,intro_count=github_trending_items.intro_count+1,last_source_url=excluded.last_source_url,updated_at=excluded.updated_at''', (repo_full_name, int(rank), fingerprint, now, source_url, now, now))
@@ -684,7 +715,7 @@ class ZeroStore:
     async def github_trending_seen_only(self, repo_full_name: str, *, rank: int, fingerprint: str, source_url: str) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('''INSERT INTO github_trending_items(repo_full_name,last_seen_rank,last_seen_fingerprint,last_source_url,created_at,updated_at)
                     VALUES(?,?,?,?,?,?)
                     ON CONFLICT(repo_full_name) DO UPDATE SET last_seen_rank=excluded.last_seen_rank,last_seen_fingerprint=excluded.last_seen_fingerprint,last_source_url=excluded.last_source_url,updated_at=excluded.updated_at''', (repo_full_name, int(rank), fingerprint, source_url, now, now))
@@ -699,14 +730,14 @@ class ZeroStore:
         if sender_id is not None: where.append('sender_id=?'); args.append(int(sender_id))
         clause=' WHERE '+' AND '.join(where) if where else ''
         async with self._lock:
-            with self._conn() as c:
+            with self._session_ctx() as c:
                 total=c.execute('SELECT COUNT(*) FROM recent_messages'+clause,args).fetchone()[0]
                 rows=c.execute('SELECT * FROM recent_messages'+clause+' ORDER BY id DESC LIMIT ? OFFSET ?',args+[size,(page-1)*size]).fetchall()
         return {'items':[dict(r) for r in rows],'total':total,'page':page,'size':size}
 
     async def panel_get_chat(self, item_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as c: row=c.execute('SELECT * FROM recent_messages WHERE id=?',(int(item_id),)).fetchone()
+            with self._session_ctx() as c: row=c.execute('SELECT * FROM recent_messages WHERE id=?',(int(item_id),)).fetchone()
         return dict(row) if row else None
 
     async def panel_list_dataset(self, dataset: str, *, query: str = '', status: str = '', page: int = 1, size: int = 25) -> dict[str, Any]:
@@ -733,11 +764,11 @@ class ZeroStore:
         if query:
             where.append('('+ ' OR '.join(f'{col} LIKE ?' for col in search_cols)+')');args.extend([f'%{query[:100]}%']*len(search_cols))
         if status:
-            with self._conn() as c: columns={r['name'] for r in c.execute(f'PRAGMA table_info({table})')}
+            with self._session_ctx() as c: columns={r['name'] for r in c.execute(f'PRAGMA table_info({table})')}
             if 'status' in columns:where.append('status=?');args.append(status[:40])
         clause=' WHERE '+' AND '.join(where) if where else ''
         async with self._lock:
-            with self._conn() as c:
+            with self._session_ctx() as c:
                 total=c.execute(f'SELECT COUNT(*) FROM {table}'+clause,args).fetchone()[0]
                 rows=c.execute(f'SELECT * FROM {table}'+clause+f' ORDER BY {order} DESC LIMIT ? OFFSET ?',args+[size,(page-1)*size]).fetchall()
         return {'items':[dict(r) for r in rows],'total':total,'page':page,'size':size}
@@ -753,7 +784,7 @@ class ZeroStore:
         if dataset not in specs: raise ValueError('unsupported_panel_dataset')
         table,pk=specs[dataset]
         async with self._lock:
-            with self._conn() as c:
+            with self._session_ctx() as c:
                 row=c.execute(f'SELECT * FROM {table} WHERE {pk}=?',(item_id,)).fetchone()
                 result=dict(row) if row else None
                 if result and dataset=='world': result['relations']=[dict(r) for r in c.execute('SELECT * FROM world_relations WHERE subject_entity_id=? OR object_entity_id=?',(item_id,item_id)).fetchall()]
@@ -761,7 +792,7 @@ class ZeroStore:
 
     async def panel_get_knowledge_item(self, item_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as c:
+            with self._session_ctx() as c:
                 row=c.execute('SELECT * FROM knowledge_items WHERE id=?',(int(item_id),)).fetchone()
                 sources=[dict(r) for r in c.execute('SELECT * FROM knowledge_sources WHERE knowledge_item_id=?',(int(item_id),)).fetchall()]
         return {'item':dict(row),'sources':sources} if row else None
@@ -769,7 +800,7 @@ class ZeroStore:
     async def panel_list_group_users(self, limit: int = 100) -> list[dict[str, Any]]:
         limit=min(100,max(1,int(limit)))
         async with self._lock:
-            with self._conn() as c: rows=c.execute('SELECT * FROM group_user_state ORDER BY last_seen DESC LIMIT ?',(limit,)).fetchall()
+            with self._session_ctx() as c: rows=c.execute('SELECT * FROM group_user_state ORDER BY last_seen DESC LIMIT ?',(limit,)).fetchall()
         return [dict(r) for r in rows]
 
     async def panel_get_settings(self, allowed_keys: set[str]) -> dict[str, str]:
@@ -777,12 +808,12 @@ class ZeroStore:
         if not keys:return {}
         placeholders=','.join('?' for _ in keys)
         async with self._lock:
-            with self._conn() as c: rows=c.execute(f'SELECT key,value FROM settings WHERE key IN ({placeholders})',keys).fetchall()
+            with self._session_ctx() as c: rows=c.execute(f'SELECT key,value FROM settings WHERE key IN ({placeholders})',keys).fetchall()
         return {str(r['key']):str(r['value']) for r in rows}
 
     async def get_setting(self, key: str, default: str | None = None) -> str | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
                 return row['value'] if row else default
     async def reserve_incoming_message(
@@ -793,7 +824,7 @@ class ZeroStore:
         """Atomically claim one inbound message across handlers, processes, and restarts."""
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT OR IGNORE INTO incoming_message_dedup
                     (platform,account_scope,chat_id,message_id,thread_id,sender_id,status,trace_id,created_at,updated_at,expires_at)
@@ -816,7 +847,7 @@ class ZeroStore:
         """Release claims left behind by a crashed handler."""
         cutoff = int(time.time()) - max(1, int(lease_seconds))
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 cur = conn.execute(
                     """UPDATE incoming_message_dedup
                        SET status='expired', reason='stale_processing_reclaimed', updated_at=?, finished_at=?
@@ -832,7 +863,7 @@ class ZeroStore:
     ) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''UPDATE incoming_message_dedup
                        SET status='replied',reply_message_id=?,trace_id=?,updated_at=?,finished_at=?
@@ -847,7 +878,7 @@ class ZeroStore:
     ) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''UPDATE incoming_message_dedup
                        SET status='failed',reason=?,trace_id=?,updated_at=?,finished_at=?
@@ -862,7 +893,7 @@ class ZeroStore:
     ) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''UPDATE incoming_message_dedup
                        SET status='expired',reason=?,trace_id=?,updated_at=?,finished_at=?
@@ -874,21 +905,21 @@ class ZeroStore:
     async def set_setting(self, key: str, value: Any) -> None:
         payload = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key, payload))
                 conn.commit()
 
     async def save_telegram_search_state(self, *, state_key: str, chat_id: int, sender_id: int, thread_id: int | None, reply_to_message_id: int | None, search_session_id: str, trace_id: str, query: str, intent: str, payload: dict, expires_at: int) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR REPLACE INTO telegram_search_state(state_key,chat_id,sender_id,thread_id,reply_to_message_id,search_session_id,trace_id,query,intent,payload_json,created_at,expires_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', (state_key, chat_id, sender_id, thread_id, reply_to_message_id, search_session_id, trace_id, query[:1000], intent, json.dumps(payload, ensure_ascii=False), now, expires_at, 'active'))
                 conn.commit()
 
     async def get_telegram_search_state(self, *, chat_id: int, sender_id: int, thread_id: int | None, reply_to_message_id: int | None, now: int | None = None) -> dict[str, Any] | None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute("UPDATE telegram_search_state SET status='expired' WHERE status='active' AND expires_at<?", (now,))
                 row = conn.execute("SELECT * FROM telegram_search_state WHERE chat_id=? AND sender_id=? AND status='active' AND expires_at>=? AND ((reply_to_message_id IS NOT NULL AND reply_to_message_id=?) OR (reply_to_message_id IS NULL AND (? IS NULL OR thread_id=?))) ORDER BY CASE WHEN reply_to_message_id=? THEN 0 ELSE 1 END, created_at DESC LIMIT 1", (chat_id, sender_id, now, reply_to_message_id, reply_to_message_id, thread_id, reply_to_message_id)).fetchone()
                 conn.commit()
@@ -898,13 +929,13 @@ class ZeroStore:
     async def expire_telegram_search_state(self) -> int:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 count = conn.execute("UPDATE telegram_search_state SET status='expired' WHERE status='active' AND expires_at<?", (now,)).rowcount; conn.commit(); return count
 
     async def get_telegram_search_cache(self, cache_key: str) -> dict[str, Any] | None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute("UPDATE telegram_search_cache SET status='expired' WHERE status='active' AND expires_at<?", (now,))
                 row = conn.execute("SELECT * FROM telegram_search_cache WHERE cache_key=? AND status='active' AND expires_at>=?", (cache_key, now)).fetchone(); conn.commit()
                 if not row: return None
@@ -913,24 +944,24 @@ class ZeroStore:
     async def set_telegram_search_cache(self, *, cache_key: str, normalized_query: str, intent: str, provider_set: str, language: str, freshness: str, visibility_scope: str, payload: dict, expires_at: int) -> None:
         now=int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR REPLACE INTO telegram_search_cache(cache_key,normalized_query,intent,provider_set,language,freshness,visibility_scope,payload_json,created_at,expires_at,status) VALUES(?,?,?,?,?,?,?,?,?,?,?)', (cache_key,normalized_query[:500],intent,provider_set,language,freshness,visibility_scope,json.dumps(payload,ensure_ascii=False),now,expires_at,'active')); conn.commit()
 
     async def clear_telegram_search_cache(self) -> int:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 count=conn.execute("UPDATE telegram_search_cache SET status='invalidated' WHERE status='active'").rowcount; conn.commit(); return count
 
     async def telegram_search_cache_status(self) -> dict[str, int]:
         now=int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return {'active': int(conn.execute("SELECT COUNT(*) FROM telegram_search_cache WHERE status='active' AND expires_at>=?",(now,)).fetchone()[0]), 'expired': int(conn.execute("SELECT COUNT(*) FROM telegram_search_cache WHERE status IN ('expired','invalidated') OR expires_at<?",(now,)).fetchone()[0])}
 
     async def consume_telegram_search_limit(self, *, account_scope: str, kind: str, daily_limit: int, day: str | None = None) -> tuple[bool, int, int]:
         day=day or datetime.now(timezone.utc).strftime('%Y-%m-%d'); now=int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row=conn.execute('SELECT used_count FROM telegram_search_limits WHERE account_scope=? AND day=? AND kind=?',(account_scope,day,kind)).fetchone(); used=int(row['used_count']) if row else 0
                 if used >= int(daily_limit): return False, used, 86400-(int(time.time())%86400)
                 used += 1; conn.execute('INSERT INTO telegram_search_limits(account_scope,day,kind,used_count,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(account_scope,day,kind) DO UPDATE SET used_count=excluded.used_count,updated_at=excluded.updated_at',(account_scope,day,kind,used,now)); conn.commit(); return True, used, 86400-(int(time.time())%86400)
@@ -938,17 +969,17 @@ class ZeroStore:
     async def telegram_search_limit_status(self, *, account_scope: str, day: str | None = None) -> list[dict[str, Any]]:
         day=day or datetime.now(timezone.utc).strftime('%Y-%m-%d')
         async with self._lock:
-            with self._conn() as conn: return [dict(r) for r in conn.execute('SELECT kind,used_count,updated_at FROM telegram_search_limits WHERE account_scope=? AND day=? ORDER BY kind',(account_scope,day)).fetchall()]
+            with self._session_ctx() as conn: return [dict(r) for r in conn.execute('SELECT kind,used_count,updated_at FROM telegram_search_limits WHERE account_scope=? AND day=? ORDER BY kind',(account_scope,day)).fetchall()]
 
     async def reset_telegram_search_limits(self, *, account_scope: str, day: str | None = None) -> int:
         day=day or datetime.now(timezone.utc).strftime('%Y-%m-%d')
         async with self._lock:
-            with self._conn() as conn: count=conn.execute('DELETE FROM telegram_search_limits WHERE account_scope=? AND day=?',(account_scope,day)).rowcount; conn.commit(); return count
+            with self._session_ctx() as conn: count=conn.execute('DELETE FROM telegram_search_limits WHERE account_scope=? AND day=?',(account_scope,day)).rowcount; conn.commit(); return count
 
     async def enqueue_telegram_knowledge_candidate(self, *, topic: str, source_provider: str, channel_identifier: str, message_id: int | None, canonical_link: str, text_excerpt: str, published_at: str, relevance_score: float, confidence: float, dedup_key: str, expires_at: int) -> str:
         now=int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 try:
                     conn.execute('INSERT INTO telegram_knowledge_candidates(topic,source_provider,channel_identifier,message_id,canonical_link,text_excerpt,published_at,discovered_at,relevance_score,confidence,status,dedup_key,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(topic,source_provider,channel_identifier,message_id,canonical_link,text_excerpt[:800],published_at[:80],now,float(relevance_score),float(confidence),'pending',dedup_key,expires_at)); conn.commit(); return 'created'
                 except sqlite3.IntegrityError: return 'duplicate'
@@ -956,7 +987,7 @@ class ZeroStore:
     async def claim_telegram_knowledge_candidates(self, limit: int = 5, lease_seconds: int = 900) -> list[dict[str, Any]]:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute("UPDATE telegram_knowledge_candidates SET status='pending' WHERE status LIKE 'processing:%' AND CAST(substr(status,13) AS INTEGER)<?", (now - lease_seconds,))
                 conn.execute("UPDATE telegram_knowledge_candidates SET status='expired' WHERE status='pending' AND expires_at<?", (now,))
                 rows = [dict(r) for r in conn.execute("SELECT * FROM telegram_knowledge_candidates WHERE status='pending' ORDER BY relevance_score DESC, discovered_at ASC LIMIT ?", (limit,)).fetchall()]
@@ -967,12 +998,12 @@ class ZeroStore:
 
     async def update_telegram_knowledge_candidate(self, candidate_id: int, status: str) -> None:
         async with self._lock:
-            with self._conn() as conn: conn.execute('UPDATE telegram_knowledge_candidates SET status=? WHERE id=?',(status,candidate_id)); conn.commit()
+            with self._session_ctx() as conn: conn.execute('UPDATE telegram_knowledge_candidates SET status=? WHERE id=?',(status,candidate_id)); conn.commit()
 
     async def enqueue_web_knowledge_candidate(self, *, query: str, normalized_query: str, title: str, url: str, publisher: str, snippet: str, extracted_relevant_text: str, language: str, confidence: float, freshness: str, trace_id: str, content_hash: str, semantic_key: str, expires_at: int) -> str:
         now=int(time.time()); source_urls=json.dumps([url], ensure_ascii=False)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 existing=conn.execute('SELECT id,source_urls_json FROM web_knowledge_candidates WHERE url=? OR content_hash=? OR semantic_key=? LIMIT 1',(url,content_hash,semantic_key)).fetchone()
                 if existing:
                     urls=list(dict.fromkeys(json.loads(existing['source_urls_json'] or '[]')+[url])); conn.execute('UPDATE web_knowledge_candidates SET source_urls_json=?,discovered_at=?,trace_id=? WHERE id=?',(json.dumps(urls,ensure_ascii=False),now,trace_id[:80],existing['id'])); conn.commit(); return 'duplicate'
@@ -984,7 +1015,7 @@ class ZeroStore:
     async def claim_web_knowledge_candidates(self, limit: int = 5, lease_seconds: int = 900) -> list[dict[str, Any]]:
         now=int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute("UPDATE web_knowledge_candidates SET status='pending' WHERE status LIKE 'processing:%' AND CAST(substr(status,13) AS INTEGER)<?",(now-lease_seconds,))
                 conn.execute("UPDATE web_knowledge_candidates SET status='expired' WHERE status='pending' AND expires_at<?",(now,))
                 rows=[dict(r) for r in conn.execute("SELECT * FROM web_knowledge_candidates WHERE status='pending' ORDER BY confidence DESC, discovered_at ASC LIMIT ?",(limit,)).fetchall()]
@@ -993,20 +1024,20 @@ class ZeroStore:
 
     async def update_web_knowledge_candidate(self, candidate_id: int, status: str) -> None:
         async with self._lock:
-            with self._conn() as conn: conn.execute('UPDATE web_knowledge_candidates SET status=? WHERE id=?',(status,candidate_id)); conn.commit()
+            with self._session_ctx() as conn: conn.execute('UPDATE web_knowledge_candidates SET status=? WHERE id=?',(status,candidate_id)); conn.commit()
 
     async def web_knowledge_queue_status(self) -> dict[str, int]:
         async with self._lock:
-            with self._conn() as conn: return {status:int(conn.execute('SELECT COUNT(*) FROM web_knowledge_candidates WHERE status=?',(status,)).fetchone()[0]) for status in ('pending','processed','rejected','duplicate','expired')}
+            with self._session_ctx() as conn: return {status:int(conn.execute('SELECT COUNT(*) FROM web_knowledge_candidates WHERE status=?',(status,)).fetchone()[0]) for status in ('pending','processed','rejected','duplicate','expired')}
 
     async def clear_web_knowledge_candidates(self) -> int:
         async with self._lock:
-            with self._conn() as conn: count=conn.execute("UPDATE web_knowledge_candidates SET status='expired' WHERE status='pending'").rowcount; conn.commit(); return count
+            with self._session_ctx() as conn: count=conn.execute("UPDATE web_knowledge_candidates SET status='expired' WHERE status='pending'").rowcount; conn.commit(); return count
 
     async def append_recent(self, chat_id: int, sender_id: int, sender_label: str, role: str, text: str, *, platform: str | None = None, account_scope: str | None = None, telegram_message_id: int | None = None, reply_to_message_id: int | None = None, thread_id: int | None = None, sender_username: str = '', sender_display_name: str = '', trace_id: str = '') -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR IGNORE INTO recent_messages(chat_id,sender_id,sender_label,role,text,platform,account_scope,telegram_message_id,reply_to_message_id,thread_id,sender_username,sender_display_name,trace_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (chat_id, sender_id, sender_label, role, text, platform, account_scope, telegram_message_id, reply_to_message_id, thread_id, sender_username, sender_display_name, trace_id, now))
                 conn.execute('DELETE FROM recent_messages WHERE chat_id=? AND id NOT IN (SELECT id FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?)', (chat_id, chat_id, self.recent_messages_limit))
                 conn.commit()
@@ -1016,7 +1047,7 @@ class ZeroStore:
         seen = {int(message_id)}
         current = int(message_id)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 for _ in range(max(0, min(int(max_depth), 32))):
                     row = conn.execute(
                         'SELECT * FROM recent_messages WHERE platform=? AND account_scope=? AND chat_id=? AND telegram_message_id=? LIMIT 1',
@@ -1038,19 +1069,19 @@ class ZeroStore:
 
     async def get_active_group_chat_ids(self) -> list[int]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT DISTINCT chat_id FROM recent_messages WHERE chat_id < 0 ORDER BY chat_id').fetchall()
         return [int(row['chat_id']) for row in rows]
 
     async def get_group_context_state(self, chat_id: int) -> dict[str, Any]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row=conn.execute('SELECT * FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone()
                 return dict(row) if row else {'chat_id':chat_id,'last_message_id':None,'last_timestamp':None,'summary_json':'{}','summary_version':0,'optimistic_version':0}
 
     async def get_unconsumed_group_messages(self, chat_id:int, limit:int=60) -> list[dict[str,Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows=conn.execute('SELECT m.* FROM recent_messages m LEFT JOIN group_context_consumed c ON c.chat_id=m.chat_id AND c.message_id=m.telegram_message_id WHERE m.chat_id=? AND m.telegram_message_id IS NOT NULL AND c.message_id IS NULL ORDER BY m.id ASC LIMIT ?',(chat_id,max(1,limit))).fetchall()
                 return [dict(r) for r in rows]
 
@@ -1058,7 +1089,7 @@ class ZeroStore:
         if not rows:return True
         now=int(time.time()); last=rows[-1]
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('BEGIN IMMEDIATE'); current=conn.execute('SELECT optimistic_version FROM group_context_state WHERE chat_id=?',(chat_id,)).fetchone(); version=int(current['optimistic_version']) if current else 0
                 if version!=expected_version: conn.execute('ROLLBACK'); return False
                 for row in rows: conn.execute('INSERT OR IGNORE INTO group_context_consumed(chat_id,message_id,edited_at) VALUES(?,?,0)',(chat_id,int(row['telegram_message_id'])))
@@ -1068,13 +1099,13 @@ class ZeroStore:
 
     async def get_recent(self, chat_id: int, limit: int = 40) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT * FROM recent_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [dict(r) for r in reversed(rows)]
 
     async def get_recent_since(self, chat_id: int, *, since_ts: int, limit: int = 5000) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(
                     'SELECT * FROM recent_messages '
                     'WHERE chat_id=? AND created_at>=? ORDER BY id DESC LIMIT ?',
@@ -1088,7 +1119,7 @@ class ZeroStore:
         log_identity_resolved(chat_id, sender_id)
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 collision = conn.execute('SELECT 1 FROM user_profiles_scoped WHERE chat_id=? AND sender_id<>? AND lower(label)=lower(?) LIMIT 1', (chat_id, sender_id, label)).fetchone()
                 if collision:
                     logger.warning('IDENTITY_COLLISION_DETECTED chat_id=%s sender_id=%s reason=display_label_not_identity', chat_id, sender_id)
@@ -1115,7 +1146,7 @@ class ZeroStore:
         if not normalized:
             return []
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT sender_id FROM user_profiles_scoped WHERE chat_id=? AND (lower(ltrim(label, "@"))=? OR lower(username)=? OR lower(display_name)=?)', (chat_id, normalized, normalized, normalized)).fetchall()
         return [int(r['sender_id']) for r in rows]
 
@@ -1125,12 +1156,12 @@ class ZeroStore:
             return []
         if target.isdigit():
             async with self._lock:
-                with self._conn() as conn:
+                with self._session_ctx() as conn:
                     row = conn.execute('SELECT 1 FROM user_profiles_scoped WHERE chat_id=? AND sender_id=?', (chat_id, int(target))).fetchone()
             return [int(target)] if row else []
         found = set(await self.find_users_by_label(chat_id, target))
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute("SELECT sender_id,value_json FROM semantic_user_memory WHERE chat_id=? AND status='active' AND category='identity'", (chat_id,)).fetchall()
                 profiles = conn.execute('SELECT sender_id,nicknames_json FROM user_profiles_scoped WHERE chat_id=?', (chat_id,)).fetchall()
         for row in rows:
@@ -1156,7 +1187,7 @@ class ZeroStore:
             return {}
         aliases: dict[str, set[int]] = {}
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 profiles = conn.execute(
                     'SELECT sender_id,label,username,display_name,nicknames_json FROM user_profiles_scoped WHERE chat_id=?',
                     (int(chat_id),),
@@ -1194,7 +1225,7 @@ class ZeroStore:
     async def get_user_notes(self, chat_id: int, sender_id: int, query: str, *, limit: int = 6) -> list[dict[str, Any]]:
         terms = {x.casefold() for x in re.findall(r'[\wآ-ی‌]{3,}', query or '')}
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_memory_notes'").fetchone():
                     return []
                 rows = conn.execute("SELECT id,section,content,source_message_id FROM user_memory_notes WHERE chat_id=? AND sender_id=? AND status='active' ORDER BY created_at DESC LIMIT 100", (int(chat_id), int(sender_id))).fetchall()
@@ -1207,13 +1238,13 @@ class ZeroStore:
 
     async def get_profile(self, chat_id: int, sender_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM user_profiles_scoped WHERE chat_id=? AND sender_id=?', (chat_id, sender_id)).fetchone()
                 return dict(row) if row else None
 
     async def top_users(self, chat_id: int | None = None, limit: int = 10) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if chat_id is None:
                     rows = conn.execute('SELECT chat_id, sender_id, label, reputation FROM user_profiles_scoped ORDER BY reputation DESC, updated_at DESC LIMIT ?', (limit,)).fetchall()
                 else:
@@ -1223,7 +1254,7 @@ class ZeroStore:
     async def memory_audit_event(self, event_type: str, layer: str, chat_id: int, *, object_id: str | None = None, actor_user_id: int | None = None, trace_id: str = '-', details: dict[str, Any] | None = None) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT INTO memory_audit(event_type,layer,chat_id,object_id,actor_user_id,trace_id,details_json,created_at) VALUES (?,?,?,?,?,?,?,?)', (event_type, layer, chat_id, object_id, actor_user_id, trace_id, json.dumps(details or {}, ensure_ascii=False), now))
                 conn.commit()
 
@@ -1236,7 +1267,7 @@ class ZeroStore:
         placeholders = ','.join('?' for _ in cols)
         updates = ','.join(f'{k}=excluded.{k}' for k in values)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(f'INSERT INTO short_term_context({",".join(cols)}) VALUES ({placeholders}) ON CONFLICT(chat_id) DO UPDATE SET {updates}', args)
                 conn.commit()
         await self.memory_audit_event('MEMORY_SHORT_UPDATED', 'short', chat_id, details=audit_details)
@@ -1244,7 +1275,7 @@ class ZeroStore:
     async def merge_short_term_context(self, chat_id: int, *, sender_id: int, message_id: int, topic: str, addressed_to_zero: int, mood: str, sensitivity: str, question_unanswered: int, should_reply: int, should_react: int, should_wait: int, should_ignore: int, audit_details: dict[str, Any] | None = None) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM short_term_context WHERE chat_id=?', (chat_id,)).fetchone()
                 current = dict(row) if row else {}
                 participants = set(json.loads(current.get('active_participants_json') or '[]'))
@@ -1274,7 +1305,7 @@ class ZeroStore:
     async def record_media_context(self, chat_id: int, message_id: int, sender_id: int, media_type: str, caption: str = '', reply_to_message_id: int | None = None, summary: str = '', ttl_seconds: int = 6 * 3600) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR REPLACE INTO short_term_media_context(media_id,chat_id,message_id,sender_id,media_type,caption,reply_to_message_id,summary,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)', (f'{chat_id}:{message_id}', chat_id, message_id, sender_id, media_type, (caption or '')[:500], reply_to_message_id, (summary or '')[:800], now, now + ttl_seconds))
                 conn.commit()
         await self.memory_audit_event('MEMORY_SHORT_DETAIL_UPDATED', 'short', chat_id, object_id=str(message_id), details={'media_type':media_type,'has_caption':bool(caption)})
@@ -1282,7 +1313,7 @@ class ZeroStore:
     async def get_recent_media_context(self, chat_id: int, query: str = '', limit: int = 5) -> list[dict[str, Any]]:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT * FROM short_term_media_context WHERE chat_id=? AND expires_at>=? ORDER BY created_at DESC LIMIT ?', (chat_id, now, max(limit * 3, 15))).fetchall()
         terms = set(re.findall(r'[\wآ-ی‌]{3,}', (query or '').lower()))
         wants_media = any(x in (query or '').lower() for x in ('چی فرست', 'چه فرست', 'این چی', 'اینو دیدی', 'درباره این', 'اینو توضیح', 'gif', 'عکس', 'تصویر', 'استیکر', 'media'))
@@ -1301,7 +1332,7 @@ class ZeroStore:
         date_key = date_key or datetime.now().strftime('%Y-%m-%d')
         start = int(datetime.strptime(date_key, '%Y-%m-%d').timestamp()); end = start + 86400
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT sender_id,role,text,created_at FROM recent_messages WHERE chat_id=? AND created_at>=? AND created_at<? ORDER BY created_at ASC', (chat_id, start, end)).fetchall()]
         user_rows = [r for r in rows if r.get('role') == 'user']
         topics = {}
@@ -1324,7 +1355,7 @@ class ZeroStore:
         from .memory import detect_topics
         end = int(as_of or time.time()); start = end - int(days) * 86400
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT id,sender_id,text,created_at,platform,account_scope,telegram_message_id FROM recent_messages WHERE chat_id=? AND role="user" AND created_at>=? AND created_at<=? ORDER BY id ASC', (chat_id, start, end)).fetchall()]
         topic_counts: dict[str, int] = {}
         for row in rows:
@@ -1340,7 +1371,7 @@ class ZeroStore:
     async def build_monthly_long_summary(self, chat_id: int, *, as_of: int | None = None) -> dict[str, Any]:
         end = int(as_of or time.time()); start = end - 30 * 86400
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT memory_id,category,content,confidence,created_at FROM long_term_memory WHERE chat_id=? AND status="active" AND created_at>=? AND created_at<=? ORDER BY confidence DESC, updated_at DESC', (chat_id, start, end)).fetchall()]
         seen=set(); facts=[]
         for row in rows:
@@ -1372,7 +1403,7 @@ class ZeroStore:
 
     async def get_short_term_context(self, chat_id: int) -> dict[str, Any]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM short_term_context WHERE chat_id=? AND expires_at>=?', (chat_id, int(time.time()))).fetchone()
                 return dict(row) if row else {}
 
@@ -1382,7 +1413,7 @@ class ZeroStore:
         participant_ids = sorted(set(participants or [])); normalized_topic = re.sub(r'\s+', ' ', topic.strip().lower())
         merged = False; conflict = ''
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 candidates = conn.execute('SELECT * FROM medium_term_memory WHERE chat_id=? AND status="active" AND lower(topic)=?', (chat_id, normalized_topic)).fetchall()
                 existing = next((row for row in candidates if sorted(set(json.loads(row['participants_json'] or '[]'))) == participant_ids), None)
                 if existing:
@@ -1410,7 +1441,7 @@ class ZeroStore:
         payload = (memory_id, chat_id, subject_user_id, category[:80], content[:1600], max(0.0,min(1.0,confidence)), json.dumps(source_message_ids or []), now, now, now, expires, 'active', 1, created_by, sensitivity_level)
         event_type = 'MEMORY_LONG_UPDATED'
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 existing = conn.execute('SELECT * FROM long_term_memory WHERE chat_id=? AND category=? AND subject_user_id IS ? AND status="active" ORDER BY updated_at DESC LIMIT 1', (chat_id, category[:80], subject_user_id)).fetchone()
                 if existing:
                     same = _memory_key(existing['content']) == _memory_key(content)
@@ -1442,7 +1473,7 @@ class ZeroStore:
         """Refresh the chat-scoped RAG index from approved active memory only."""
         now = int(time.time()); docs = []
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 long_rows = conn.execute('SELECT memory_id,subject_user_id,category,content,confidence,source_message_ids_json,expires_at FROM long_term_memory WHERE chat_id=? AND status="active" AND (expires_at IS NULL OR expires_at>=?)', (chat_id, now)).fetchall()
                 medium_rows = conn.execute('SELECT event_id,participants_json,topic,summary,confidence,source_message_ids_json,expires_at FROM medium_term_memory WHERE chat_id=? AND status="active" AND expires_at>=?', (chat_id, now)).fetchall()
                 semantic_rows = conn.execute('SELECT id,sender_id,category,key,value_json,confidence,evidence_message_ids_json FROM semantic_user_memory WHERE chat_id=? AND status="active"', (chat_id,)).fetchall()
@@ -1469,7 +1500,7 @@ class ZeroStore:
         if not match:
             return []
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('''SELECT d.*, bm25(memory_rag_fts) AS rank FROM memory_rag_fts JOIN memory_rag_documents d ON d.doc_id=memory_rag_fts.doc_id WHERE memory_rag_fts MATCH ? AND d.chat_id=? AND d.status='active' AND (d.subject_user_id IS NULL OR d.subject_user_id=?) AND (d.expires_at IS NULL OR d.expires_at>=?) ORDER BY rank LIMIT ?''', (match, str(chat_id), sender_id, int(time.time()), max(1, min(limit, 20)))).fetchall()
         return [dict(r) for r in rows]
 
@@ -1477,7 +1508,7 @@ class ZeroStore:
         terms = {x for x in re.findall(r'[\wآ-ی‌]{3,}', (query or '').lower())}
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 short_rows = [dict(r) for r in conn.execute('SELECT * FROM short_term_context WHERE chat_id=? AND expires_at>=?', (chat_id, now)).fetchall()]
                 medium_rows = [dict(r) for r in conn.execute('SELECT * FROM medium_term_memory WHERE chat_id=? AND status="active" AND expires_at>=?', (chat_id, now)).fetchall()]
                 long_rows = [dict(r) for r in conn.execute('SELECT * FROM long_term_memory WHERE chat_id=? AND status="active" AND (expires_at IS NULL OR expires_at>=?)', (chat_id, now)).fetchall()]
@@ -1517,7 +1548,7 @@ class ZeroStore:
     async def rebuild_short_from_recent(self, chat_id: int, limit: int = 100) -> dict[str, Any]:
         from .memory import detect_mood, detect_topics
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT id,telegram_message_id,sender_id,text FROM recent_messages WHERE chat_id=? AND role="user" ORDER BY id DESC LIMIT ?', (chat_id, min(1000, max(1, limit)))).fetchall()]
         if not rows:
             await self.memory_audit_event('MEMORY_SHORT_SKIPPED', 'short', chat_id, details={'reason':'no_recent_messages'})
@@ -1539,7 +1570,7 @@ class ZeroStore:
         await self.memory_audit_event('MEMORY_BACKFILL_STARTED', 'medium', chat_id, details={'count':count})
         await self.rebuild_short_from_recent(chat_id, count)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT id,telegram_message_id,sender_id,text FROM recent_messages WHERE chat_id=? AND role="user" ORDER BY id DESC LIMIT ?', (chat_id, count)).fetchall()]
         created = 0
         for row in reversed(rows):
@@ -1555,7 +1586,7 @@ class ZeroStore:
 
     async def memory_status(self, chat_id: int) -> dict[str, int]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return {layer: int(conn.execute(query, (chat_id,)).fetchone()[0]) for layer, query in {'long':'SELECT count(*) FROM long_term_memory WHERE chat_id=? AND status="active"','medium':'SELECT count(*) FROM medium_term_memory WHERE chat_id=? AND status="active" AND expires_at>=strftime("%s","now")','short':'SELECT count(*) FROM short_term_context WHERE chat_id=? AND expires_at>=strftime("%s","now")'}.items()}
 
     async def soft_clear_memory(self, chat_id: int, layer: str, *, actor_user_id: int, trace_id: str, reason: str) -> int:
@@ -1563,7 +1594,7 @@ class ZeroStore:
         if not table: raise ValueError('invalid memory scope')
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(f'SELECT * FROM {table} WHERE chat_id=?' + ('' if layer == 'short' else ' AND status="active"'), (chat_id,)).fetchall()
                 for row in rows:
                     object_id = str(row['chat_id'] if layer == 'short' else row['event_id'] if layer == 'medium' else row['memory_id'])
@@ -1585,7 +1616,7 @@ class ZeroStore:
         now = int(time.time())
         affected_chats: list[int] = []
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if chat_id is None:
                     affected_chats = [int(r['chat_id']) for r in conn.execute('SELECT DISTINCT chat_id FROM medium_term_memory WHERE status="active" AND expires_at<?', (now,)).fetchall()]
                     count = conn.execute('UPDATE medium_term_memory SET status="archived" WHERE status="active" AND expires_at<?', (now,)).rowcount
@@ -1603,13 +1634,13 @@ class ZeroStore:
 
     async def promote_medium_memory(self, event_id: str, *, actor_user_id: int, trace_id: str) -> str:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM medium_term_memory WHERE event_id=? AND status="active"', (event_id,)).fetchone()
         if not row or not row['promotion_candidate'] or float(row['confidence']) < 0.85:
             raise ValueError('medium memory is not an eligible deterministic promotion candidate')
         memory_id = await self.add_long_memory(int(row['chat_id']), 'promoted:' + row['topic'], row['summary'], created_by=actor_user_id, source_message_ids=json.loads(row['source_message_ids_json']), confidence=float(row['confidence']))
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE medium_term_memory SET status="promoted" WHERE event_id=?', (event_id,)); conn.commit()
         await self.refresh_rag_index(int(row['chat_id']))
         await self.memory_audit_event('MEMORY_PROMOTED_TO_LONG', 'medium', int(row['chat_id']), object_id=event_id, actor_user_id=actor_user_id, trace_id=trace_id, details={'memory_id':memory_id})
@@ -1617,7 +1648,7 @@ class ZeroStore:
 
     async def update_recent_medium_memory(self, chat_id: int, summary: str, *, participant_id: int | None = None, source_message_id: int | None = None) -> bool:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT * FROM medium_term_memory WHERE chat_id=? AND status="active" ORDER BY last_referenced_at DESC LIMIT 20', (chat_id,)).fetchall()
                 row = None
                 for candidate in rows:
@@ -1636,7 +1667,7 @@ class ZeroStore:
 
     async def find_active_long_memory(self, chat_id: int, category: str, subject_user_id: int | None = None) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if subject_user_id is None:
                     row = conn.execute('SELECT * FROM long_term_memory WHERE chat_id=? AND category=? AND status="active" ORDER BY updated_at DESC LIMIT 1', (chat_id, category)).fetchone()
                 else:
@@ -1649,7 +1680,7 @@ class ZeroStore:
             raise ValueError('sensitive memory is not persistable')
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM long_term_memory WHERE memory_id=? AND status="active"', (memory_id,)).fetchone()
                 if not row:
                     return False
@@ -1662,7 +1693,7 @@ class ZeroStore:
 
     async def restore_memory_revision(self, chat_id: int, revision_id: str, *, actor_user_id: int, trace_id: str) -> bool:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rev = conn.execute('SELECT * FROM memory_revisions WHERE revision_id=? AND chat_id=?', (revision_id, chat_id)).fetchone()
                 if not rev or not rev['before_json']:
                     return False
@@ -1685,20 +1716,20 @@ class ZeroStore:
         return True
     async def list_memory_revisions(self, chat_id: int, layer: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if layer: rows = conn.execute('SELECT * FROM memory_revisions WHERE chat_id=? AND layer=? ORDER BY created_at DESC LIMIT ?', (chat_id, layer, limit)).fetchall()
                 else: rows = conn.execute('SELECT * FROM memory_revisions WHERE chat_id=? ORDER BY created_at DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [dict(r) for r in rows]
 
     async def add_memory_item(self, kind: str, value: str, score: int = 0) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT INTO memory_items(kind, value, score, created_at) VALUES (?, ?, ?, ?)', (kind, value, score, int(time.time())))
                 conn.commit()
 
     async def get_memory_items(self, kind: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if kind:
                     rows = conn.execute('SELECT kind, value, score, created_at FROM memory_items WHERE kind=? ORDER BY score DESC, id DESC LIMIT ?', (kind, limit)).fetchall()
                 else:
@@ -1710,7 +1741,7 @@ class ZeroStore:
         values = (int(chat_id), sender_id, kind, int(time.time())) if chat_id is not None else (sender_id, kind, int(time.time()))
         columns = 'chat_id, sender_id, kind, created_at' if chat_id is not None else 'sender_id, kind, created_at'
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(f'INSERT INTO {table}({columns}) VALUES ({",".join("?" for _ in values)})', values)
                 conn.commit()
 
@@ -1720,14 +1751,14 @@ class ZeroStore:
         where = 'chat_id=? AND sender_id=? AND kind=? AND created_at>=?' if chat_id is not None else 'sender_id=? AND kind=? AND created_at>=?'
         args = (int(chat_id), sender_id, kind, cutoff) if chat_id is not None else (sender_id, kind, cutoff)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute(f'SELECT COUNT(*) AS c FROM {table} WHERE {where}', args).fetchone()
                 return int(row['c'])
 
     async def try_reserve_rate_event(self, sender_id: int, kind: str, since_seconds: int, limit: int, *, chat_id: int | None = None, vision: bool = False) -> tuple[bool, int]:
         cutoff = int(time.time()) - int(since_seconds)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if vision:
                     table, where, args = 'vision_rate_events', 'sender_id=? AND kind=? AND created_at>=?', (sender_id, kind, cutoff)
                     columns, values = 'sender_id,kind,created_at', (sender_id, kind, int(time.time()))
@@ -1747,7 +1778,7 @@ class ZeroStore:
     async def add_vision_rate_event(self, sender_id: int, kind: str) -> None:
         """Record a vision rate event (image/gif) persistently."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT INTO vision_rate_events(sender_id, kind, created_at) VALUES (?, ?, ?)', (sender_id, kind, int(time.time())))
                 conn.commit()
 
@@ -1755,13 +1786,13 @@ class ZeroStore:
         """Count vision rate events for a user within a time window."""
         cutoff = int(time.time()) - since_seconds
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT COUNT(*) AS c FROM vision_rate_events WHERE sender_id=? AND kind=? AND created_at>=?', (sender_id, kind, cutoff)).fetchone()
                 return int(row['c'])
 
     async def incr_daily_stats(self, day: str, **deltas: int | float) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR IGNORE INTO stats(day) VALUES (?)', (day,))
                 for key, value in deltas.items():
                     conn.execute(f'UPDATE stats SET {key} = COALESCE({key}, 0) + ? WHERE day=?', (value, day))
@@ -1769,7 +1800,7 @@ class ZeroStore:
 
     async def get_today_stats(self, day: str) -> dict[str, Any]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM stats WHERE day=?', (day,)).fetchone()
                 return dict(row) if row else {}
 
@@ -1778,7 +1809,7 @@ class ZeroStore:
     async def get_social_group_state(self, chat_id: int) -> dict[str, Any]:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR IGNORE INTO social_group_state(chat_id, updated_at) VALUES (?, ?)', (chat_id, now))
                 row = conn.execute('SELECT * FROM social_group_state WHERE chat_id=?', (chat_id,)).fetchone()
                 conn.commit()
@@ -1788,7 +1819,7 @@ class ZeroStore:
                                         negative_delta: int = 0, accepted_delta: int = 0, ignored_delta: int = 0) -> dict[str, Any]:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR IGNORE INTO social_group_state(chat_id, updated_at) VALUES (?, ?)', (chat_id, now))
                 conn.execute(
                     '''UPDATE social_group_state SET social_reputation=social_reputation + ?,
@@ -1808,26 +1839,26 @@ class ZeroStore:
     async def add_social_feedback_event(self, chat_id: int, sender_id: int, kind: str, *, now: int | None = None) -> None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT INTO social_feedback_events(chat_id, sender_id, kind, created_at) VALUES (?, ?, ?, ?)', (chat_id, sender_id, kind, now))
                 conn.commit()
 
     async def count_social_feedback_users(self, chat_id: int, kind: str, since_seconds: int) -> int:
         cutoff = int(time.time()) - since_seconds
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT COUNT(DISTINCT sender_id) AS c FROM social_feedback_events WHERE chat_id=? AND kind=? AND created_at>=?', (chat_id, kind, cutoff)).fetchone()
                 return int(row['c'])
 
     async def record_social_action_message(self, chat_id: int, message_id: int, action: str) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('INSERT OR REPLACE INTO social_action_messages(chat_id, message_id, action, created_at) VALUES (?, ?, ?, ?)', (chat_id, message_id, action, int(time.time())))
                 conn.commit()
 
     async def social_action_for_message(self, chat_id: int, message_id: int) -> str | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT action FROM social_action_messages WHERE chat_id=? AND message_id=?', (chat_id, message_id)).fetchone()
                 return str(row['action']) if row else None
 
@@ -1835,7 +1866,7 @@ class ZeroStore:
         now = int(now or time.time()); day = datetime.fromtimestamp(now).strftime('%Y-%m-%d')
         topics = list(dict.fromkeys((topics or [])[:8])); emojis = list(dict.fromkeys((emojis or [])[:8]))
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM social_stats WHERE chat_id=? AND day=?', (chat_id, day)).fetchone()
                 stats = dict(row) if row else {'message_count': 0, 'sticker_count': 0, 'gif_count': 0, 'image_count': 0, 'user_counts_json': '{}', 'topic_counts_json': '{}', 'emoji_counts_json': '{}'}
                 users, topic_counts, emoji_counts = (json.loads(stats[k] or '{}') for k in ('user_counts_json', 'topic_counts_json', 'emoji_counts_json'))
@@ -1858,7 +1889,7 @@ class ZeroStore:
     async def get_social_plus_stats(self, chat_id: int, *, days: int = 1) -> dict[str, Any]:
         cutoff = (datetime.now() - __import__('datetime').timedelta(days=max(1, days) - 1)).strftime('%Y-%m-%d')
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = [dict(r) for r in conn.execute('SELECT * FROM social_stats WHERE chat_id=? AND day>=? ORDER BY day DESC', (chat_id, cutoff)).fetchall()]
         totals = {key: sum(int(r.get(key, 0)) for r in rows) for key in ('message_count','sticker_count','gif_count','image_count')}
         users: dict[str, int] = {}; topics: dict[str, int] = {}
@@ -1871,7 +1902,7 @@ class ZeroStore:
 
     async def get_social_plus_context(self, chat_id: int, query: str = '') -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT topic,summary,participants_json,confidence FROM social_threads WHERE chat_id=? ORDER BY last_activity DESC LIMIT 3', (chat_id,)).fetchall()
                 jokes = conn.execute('SELECT phrase,confidence,users_json,days_json FROM inside_jokes WHERE chat_id=? ORDER BY confidence DESC,last_seen DESC LIMIT 20', (chat_id,)).fetchall()
         qualified = [dict(r) for r in jokes if len(json.loads(r['users_json'] or '[]')) >= 3 and len(json.loads(r['days_json'] or '[]')) >= 2 and float(r['confidence']) >= 0.65]
@@ -1882,13 +1913,13 @@ class ZeroStore:
         if today: args.append(int(datetime.combine(datetime.now().date(), datetime.min.time()).timestamp()))
         args.append(limit)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return [dict(r) for r in conn.execute(f'SELECT quote,occurrences FROM social_quotes WHERE chat_id=?{where} ORDER BY last_seen DESC LIMIT ?', args).fetchall()]
 
 
     async def get_limit_challenge_progress(self, user_id: int, chat_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute(
                     'SELECT * FROM limit_challenge_progress WHERE user_id=? AND chat_id=?', (user_id, chat_id),
                 ).fetchone()
@@ -1900,7 +1931,7 @@ class ZeroStore:
                                               daily_completed_count: int | None = None, day_key: str | None = None) -> dict[str, Any]:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM limit_challenge_progress WHERE user_id=? AND chat_id=?', (user_id, chat_id)).fetchone()
                 current = dict(row) if row else {}
                 values = {
@@ -1927,7 +1958,7 @@ class ZeroStore:
 
     async def get_limit_challenge_active(self, user_id: int, chat_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute(
                     "SELECT * FROM limit_challenge_active WHERE user_id=? AND chat_id=? AND status='active'", (user_id, chat_id),
                 ).fetchone()
@@ -1937,7 +1968,7 @@ class ZeroStore:
                                             question: str, answer: str, answer_hash: str, expires_at: int) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO limit_challenge_active(user_id, chat_id, stage, challenge_id, question, answer, answer_hash, attempts, created_at, expires_at, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active')
@@ -1949,7 +1980,7 @@ class ZeroStore:
 
     async def record_limit_challenge_wrong_answer(self, user_id: int, chat_id: int, *, max_attempts: int = 2) -> tuple[int, bool]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute("SELECT attempts FROM limit_challenge_active WHERE user_id=? AND chat_id=? AND status='active'", (user_id, chat_id)).fetchone()
                 if not row:
                     return 0, True
@@ -1962,26 +1993,26 @@ class ZeroStore:
 
     async def close_limit_challenge_active(self, user_id: int, chat_id: int, status: str = 'completed') -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE limit_challenge_active SET status=? WHERE user_id=? AND chat_id=?', (status, user_id, chat_id))
                 conn.commit()
 
     async def expire_limit_challenge_active(self, user_id: int, chat_id: int, *, now: int | None = None) -> bool:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 changed = conn.execute("UPDATE limit_challenge_active SET status='expired' WHERE user_id=? AND chat_id=? AND status='active' AND expires_at<=?", (user_id, chat_id, now)).rowcount
                 conn.commit()
                 return bool(changed)
 
     async def count_limit_challenge_active(self, user_id: int, chat_id: int) -> int:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return int(conn.execute("SELECT COUNT(*) AS c FROM limit_challenge_active WHERE user_id=? AND chat_id=? AND status='active'", (user_id, chat_id)).fetchone()['c'])
 
     async def ensure_limit_challenge_template(self, stage: int, template_id: str, template_type: str, template: Any) -> bool:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 created = conn.execute(
                     'INSERT OR IGNORE INTO limit_challenge_templates(stage, template_id, template_type, template_json, created_at) VALUES (?, ?, ?, ?, ?)',
                     (stage, template_id, template_type, json.dumps(template, ensure_ascii=False), int(time.time())),
@@ -1991,7 +2022,7 @@ class ZeroStore:
 
     async def list_limit_challenge_templates(self, stage: int | None = None) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if stage is None:
                     rows = conn.execute('SELECT * FROM limit_challenge_templates ORDER BY stage, template_id').fetchall()
                 else:
@@ -2000,19 +2031,19 @@ class ZeroStore:
 
     async def mark_limit_challenge_template_used(self, stage: int, template_id: str) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE limit_challenge_templates SET usage_count=usage_count+1, last_used_at=? WHERE stage=? AND template_id=?', (int(time.time()), stage, template_id))
                 conn.commit()
 
     async def list_limit_challenge_progress(self, user_id: int) -> list[dict[str, Any]]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT * FROM limit_challenge_progress WHERE user_id=? ORDER BY chat_id', (user_id,)).fetchall()
                 return [dict(row) for row in rows]
 
     async def clear_limit_challenge_active(self, user_id: int, chat_id: int | None = None) -> int:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if chat_id is None:
                     changed = conn.execute("UPDATE limit_challenge_active SET status='cleared' WHERE user_id=? AND status='active'", (user_id,)).rowcount
                 else:
@@ -2022,7 +2053,7 @@ class ZeroStore:
 
     async def reset_limit_challenge(self, user_id: int, chat_id: int | None = None) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 if chat_id is None:
                     conn.execute('DELETE FROM limit_challenge_progress WHERE user_id=?', (user_id,))
                     conn.execute('DELETE FROM limit_challenge_active WHERE user_id=?', (user_id,))
@@ -2036,7 +2067,7 @@ class ZeroStore:
     async def touch_group_user(self, user_id: int, chat_id: int, label: str, *, now: int | None = None, joined: bool = False) -> None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO group_user_state(user_id, chat_id, label, first_seen, last_seen, joined_at)
                        VALUES (?, ?, ?, ?, ?, ?)
@@ -2052,7 +2083,7 @@ class ZeroStore:
     async def record_group_user_message(self, user_id: int, chat_id: int, label: str, *, now: int | None = None) -> None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO group_user_state(user_id, chat_id, label, first_seen, last_seen, message_count)
                        VALUES (?, ?, ?, ?, ?, 1)
@@ -2067,7 +2098,7 @@ class ZeroStore:
     async def claim_group_welcome(self, user_id: int, chat_id: int, *, now: int | None = None) -> bool:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO group_user_state(user_id, chat_id, label, first_seen, last_seen, joined_at)
                        VALUES (?, ?, '', ?, ?, ?)
@@ -2086,7 +2117,7 @@ class ZeroStore:
     async def set_group_social_opt_out(self, user_id: int, chat_id: int, enabled: bool = True) -> None:
         await self.touch_group_user(user_id, chat_id, '')
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE group_user_state SET social_opt_out=? WHERE user_id=? AND chat_id=?', (int(enabled), user_id, chat_id))
                 conn.commit()
 
@@ -2097,7 +2128,7 @@ class ZeroStore:
     async def mark_inactive_ping(self, user_id: int, chat_id: int, *, now: int | None = None) -> None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE group_user_state SET last_inactive_ping=? WHERE user_id=? AND chat_id=?', (now, user_id, chat_id))
                 conn.commit()
 
@@ -2113,21 +2144,21 @@ class ZeroStore:
         query += ' ORDER BY last_seen ASC LIMIT ?'
         params.append(limit)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 return [dict(row) for row in conn.execute(query, params).fetchall()]
 
     async def mark_group_user_left(self, user_id: int, chat_id: int, *, now: int | None = None) -> None:
         now = int(now or time.time())
         await self.touch_group_user(user_id, chat_id, '', now=now)
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE group_user_state SET left_at=? WHERE user_id=? AND chat_id=?', (now, user_id, chat_id))
                 conn.commit()
 
     async def mark_user_dm_allowed(self, user_id: int, *, now: int | None = None) -> None:
         now = int(now or time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO group_user_state(user_id, chat_id, label, first_seen, last_seen, dm_allowed)
                        VALUES (?, 0, '', ?, ?, 1)
@@ -2138,7 +2169,7 @@ class ZeroStore:
 
     async def user_dm_allowed_for_group(self, user_id: int, chat_id: int) -> bool:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute(
                     'SELECT 1 FROM group_user_state WHERE user_id=? AND chat_id IN (?, 0) AND dm_allowed=1 LIMIT 1',
                     (user_id, chat_id),
@@ -2147,7 +2178,7 @@ class ZeroStore:
 
     async def get_group_user_state(self, user_id: int, chat_id: int) -> dict[str, Any] | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM group_user_state WHERE user_id=? AND chat_id=?', (user_id, chat_id)).fetchone()
                 return dict(row) if row else None
 
@@ -2156,7 +2187,7 @@ class ZeroStore:
     async def add_sticker(self, sticker: Sticker) -> None:
         """Insert or update a sticker in the database."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO stickers (
                         doc_id, access_hash, file_reference, mime_type, emoji,
@@ -2188,7 +2219,7 @@ class ZeroStore:
     async def get_sticker(self, doc_id: int) -> Sticker | None:
         """Get a sticker by doc_id."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM stickers WHERE doc_id=?', (doc_id,)).fetchone()
                 if not row:
                     return None
@@ -2217,7 +2248,7 @@ class ZeroStore:
         params.append(limit)
         
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(query, params).fetchall()
                 return [self._row_to_sticker(row) for row in rows]
 
@@ -2233,7 +2264,7 @@ class ZeroStore:
         """Increment usage count and update last_seen."""
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''UPDATE stickers SET 
                         usage_count = usage_count + 1,
@@ -2247,7 +2278,7 @@ class ZeroStore:
     async def record_sticker_observation(self, doc_id: int, chat_id: int, sender_id: int, message_id: int) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET chat_id=?, sender_id=?, message_id=?, last_seen=?, is_available=1, sticker_type=CASE WHEN is_video=1 THEN \'video\' WHEN is_animated=1 THEN \'animated\' ELSE \'static\' END WHERE doc_id=?',
                     (chat_id, sender_id, message_id, now, doc_id),
@@ -2267,7 +2298,7 @@ class ZeroStore:
             raise ValueError(f"invalid sticker trigger_type: {trigger_type}")
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET send_count=send_count+1, last_sent_at=?, message_id=COALESCE(?, message_id), is_available=1 WHERE doc_id=?',
                     (now, message_id, doc_id),
@@ -2280,13 +2311,13 @@ class ZeroStore:
 
     async def record_sticker_send_failure(self, doc_id: int) -> None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute('UPDATE stickers SET failure_count=failure_count+1 WHERE doc_id=?', (doc_id,))
                 conn.commit()
 
     async def get_recent_sticker_doc_ids(self, chat_id: int, limit: int = 10) -> list[int]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute('SELECT doc_id FROM sticker_send_history WHERE chat_id=? ORDER BY sent_at DESC LIMIT ?', (chat_id, limit)).fetchall()
                 return [int(row['doc_id']) for row in rows]
 
@@ -2307,7 +2338,7 @@ class ZeroStore:
         now = int(time.time())
         window_cutoff = now - 3600
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 count = int(conn.execute(
                     f'SELECT COUNT(*) AS c FROM sticker_send_history WHERE chat_id=? AND sent_at>=? AND {predicate}',
                     (chat_id, window_cutoff),
@@ -2340,7 +2371,7 @@ class ZeroStore:
             raise ValueError(f"invalid gif trigger_type: {trigger_type}")
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET send_count=send_count+1, last_sent_at=?, message_id=COALESCE(?, message_id), is_available=1 WHERE doc_id=?',
                     (now, message_id, doc_id),
@@ -2353,7 +2384,7 @@ class ZeroStore:
 
     async def get_recent_gif_doc_ids(self, chat_id: int, limit: int = 10) -> list[int]:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(
                     'SELECT doc_id FROM gif_send_history WHERE chat_id=? ORDER BY sent_at DESC, id DESC LIMIT ?',
                     (chat_id, limit),
@@ -2376,7 +2407,7 @@ class ZeroStore:
         now = int(time.time())
         cutoff = now - 3600
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 count = int(conn.execute(
                     f'SELECT COUNT(*) AS c FROM gif_send_history WHERE chat_id=? AND sent_at>=? AND {predicate}',
                     (chat_id, cutoff),
@@ -2398,7 +2429,7 @@ class ZeroStore:
 
     async def get_latest_media_send_type(self, chat_id: int) -> str | None:
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute(
                     """SELECT media_type FROM (
                          SELECT sent_at, id, 'sticker' AS media_type FROM sticker_send_history WHERE chat_id=?
@@ -2412,7 +2443,7 @@ class ZeroStore:
     async def mark_sticker_saved(self, doc_id: int) -> None:
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET saved_to_account = 1, saved_at = ? WHERE doc_id = ?',
                     (now, doc_id)
@@ -2422,7 +2453,7 @@ class ZeroStore:
     async def mark_sticker_recent_saved(self, doc_id: int) -> None:
         """Mark sticker as recently saved."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET recent_saved = 1 WHERE doc_id = ?',
                     (doc_id,)
@@ -2432,7 +2463,7 @@ class ZeroStore:
     async def update_sticker_vision(self, doc_id: int, summary: str, tags: str, nsfw_score: float) -> None:
         """Update vision analysis results."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET vision_summary = ?, vision_tags = ?, nsfw_score = ? WHERE doc_id = ?',
                     (summary, tags, nsfw_score, doc_id)
@@ -2442,7 +2473,7 @@ class ZeroStore:
     async def update_sticker_classification(self, doc_id: int, mood_tags: str, quality_score: float, spam_score: float) -> None:
         """Update mood and quality classification."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET mood_tags = ?, quality_score = ?, spam_score = ? WHERE doc_id = ?',
                     (mood_tags, quality_score, spam_score, doc_id)
@@ -2452,7 +2483,7 @@ class ZeroStore:
     async def update_sticker_last_message(self, doc_id: int, message_id: int) -> None:
         """Update the last message ID for a sticker."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET last_message_id = ? WHERE doc_id = ?',
                     (message_id, doc_id)
@@ -2467,7 +2498,7 @@ class ZeroStore:
         affecting the wrong sticker.
         """
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(
                     'SELECT doc_id FROM stickers WHERE last_message_id = ?', (message_id,)
                 ).fetchall()
@@ -2483,7 +2514,7 @@ class ZeroStore:
     async def update_sticker_file_reference(self, doc_id: int, file_reference: bytes, access_hash: int | None = None) -> None:
         """Update expiring file reference and, when supplied, access hash."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET file_reference = ?, access_hash = COALESCE(?, access_hash) WHERE doc_id = ?',
                     (file_reference, access_hash, doc_id)
@@ -2494,7 +2525,7 @@ class ZeroStore:
         """Update saved_to_account flag for a sticker."""
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE stickers SET saved_to_account = ?, saved_at = ? WHERE doc_id = ?',
                     (saved, now, doc_id)
@@ -2504,7 +2535,7 @@ class ZeroStore:
     async def get_sticker_stats(self) -> dict:
         """Get sticker library statistics."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 total = conn.execute('SELECT COUNT(*) AS c FROM stickers').fetchone()['c']
                 saved = conn.execute('SELECT COUNT(*) AS c FROM stickers WHERE saved_to_account = 1').fetchone()['c']
                 recent = conn.execute('SELECT COUNT(*) AS c FROM stickers WHERE recent_saved = 1').fetchone()['c']
@@ -2529,7 +2560,7 @@ class ZeroStore:
     async def get_recent_stickers(self, limit: int = 20) -> list[Sticker]:
         """Get recently saved stickers."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(
                     'SELECT * FROM stickers WHERE recent_saved = 1 ORDER BY last_seen DESC LIMIT ?',
                     (limit,)
@@ -2579,7 +2610,7 @@ class ZeroStore:
     async def add_sticker_set(self, sticker_set: StickerSet) -> None:
         """Insert or update a sticker set."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     '''INSERT INTO sticker_sets (
                         set_id, access_hash, short_name, title, count,
@@ -2603,7 +2634,7 @@ class ZeroStore:
     async def get_sticker_set(self, set_id: int) -> StickerSet | None:
         """Get a sticker set by ID."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM sticker_sets WHERE set_id=?', (set_id,)).fetchone()
                 if not row:
                     return None
@@ -2624,7 +2655,7 @@ class ZeroStore:
     async def get_sticker_set_by_short_name(self, short_name: str) -> StickerSet | None:
         """Get a sticker set by short name."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 row = conn.execute('SELECT * FROM sticker_sets WHERE short_name=?', (short_name,)).fetchone()
                 if not row:
                     return None
@@ -2646,7 +2677,7 @@ class ZeroStore:
         """Mark a sticker set as installed."""
         now = int(time.time())
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 conn.execute(
                     'UPDATE sticker_sets SET installed = 1, installed_at = ?, updated_at = ? WHERE set_id = ?',
                     (now, now, set_id)
@@ -2656,7 +2687,7 @@ class ZeroStore:
     async def get_installed_sticker_sets(self) -> list[StickerSet]:
         """Get all installed sticker sets."""
         async with self._lock:
-            with self._conn() as conn:
+            with self._session_ctx() as conn:
                 rows = conn.execute(
                     'SELECT * FROM sticker_sets WHERE installed = 1 ORDER BY updated_at DESC'
                 ).fetchall()

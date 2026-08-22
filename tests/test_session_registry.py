@@ -14,9 +14,11 @@ class FakeLoginAdapter:
         return self.outcome
 
 
-def test_session_registry_lifecycle_and_active_delete_guard(tmp_path):
-    from zero.sessions import ActiveSessionError, SessionRegistry, SessionRegistryError
+from zero.fsprivacy import path_is_private
+from zero.sessions import ActiveSessionError, SessionRegistry, SessionRegistryError
 
+
+def test_session_registry_lifecycle_and_active_delete_guard(tmp_path):
     registry = SessionRegistry(tmp_path / "sessions")
     record = registry.add("primary", label="Primary account")
     assert record.state == "new"
@@ -61,8 +63,8 @@ def test_session_registry_permissions_and_active_resolution(tmp_path):
     from zero.sessions import SessionRegistry
 
     registry = SessionRegistry(tmp_path / "sessions")
-    assert (tmp_path / "sessions").stat().st_mode & 0o777 == 0o700
-    assert registry.db_path.stat().st_mode & 0o777 == 0o600
+    assert path_is_private(tmp_path / "sessions")
+    assert path_is_private(registry.db_path)
     assert registry.resolve_active_path("/legacy/session") == Path("/legacy/session")
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -14,6 +15,12 @@ from zero.office.intake import OfficeIntakeService
 from zero.office.planner import OfficePlanner
 from zero.office.telegram import TelegramOfficeBridge
 from zero.office.worker import OfficeWorker, PlanningCoordinator
+
+_E2E_CLI = Path(os.environ.get("ZERO_OFFICECLI_PATH", "/usr/local/lib/zero-office/officecli"))
+pytestmark = pytest.mark.skipif(
+    not (_E2E_CLI.exists() and os.access(_E2E_CLI, os.X_OK)),
+    reason="officecli binary not built/installed on this machine (set ZERO_OFFICECLI_PATH)",
+)
 
 
 class TelegramEvent:

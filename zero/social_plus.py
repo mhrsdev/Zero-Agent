@@ -5,6 +5,7 @@ existing short/medium memory layers.
 """
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import json
 import logging
 import re
@@ -39,7 +40,7 @@ class SocialAwarenessPlus:
     async def _thread(self, chat_id: int, user_id: int, text: str, topics: list[str], now: int) -> None:
         topic = topics[0] if topics else 'general'
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT * FROM social_threads WHERE chat_id=? AND topic=? AND last_activity>=? ORDER BY last_activity DESC LIMIT 1', (chat_id, topic, now - 6 * 3600)).fetchone()
                 if row:
                     participants = sorted(set(json.loads(row['participants_json'] or '[]') + [user_id]))[:20]
@@ -57,7 +58,7 @@ class SocialAwarenessPlus:
             return
         day = datetime.fromtimestamp(now).strftime('%Y-%m-%d')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 for phrase in candidates[:2]:
                     row = conn.execute('SELECT * FROM inside_jokes WHERE chat_id=? AND phrase=?', (chat_id, phrase)).fetchone()
                     users = sorted(set(json.loads(row['users_json'] or '[]') if row else []) | {user_id})[:20]
@@ -74,7 +75,7 @@ class SocialAwarenessPlus:
         if len(quote) < 12 or not any(x in quote for x in ('😂', '🤣', '🔥', '❤️')):
             return
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT * FROM social_quotes WHERE chat_id=? AND quote=?', (chat_id, quote)).fetchone()
                 users = sorted(set(json.loads(row['users_json'] or '[]') if row else []) | {user_id})[:20]
                 occurrences = int(row['occurrences']) + 1 if row else 1

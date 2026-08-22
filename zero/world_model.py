@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .sqlite_tx import sqlite_txn
 import json,re,sqlite3,time
 from pathlib import Path
 SCHEMA='''
@@ -16,23 +17,23 @@ class WorldModel:
   c=sqlite3.connect(self.db_path,timeout=5);c.row_factory=sqlite3.Row;c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');return c
  def entity(self,name,entity_type,properties=None):
   if PERSONAL.search(name) or PERSONAL.search(json.dumps(properties or {})):raise ValueError('personal_data_rejected')
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    c.execute('INSERT OR IGNORE INTO world_entities(canonical_name,entity_type,properties_json) VALUES(?,?,?)',(name,entity_type,json.dumps(properties or {},ensure_ascii=False)));c.commit();return c.execute('SELECT id FROM world_entities WHERE canonical_name=?',(name,)).fetchone()['id']
  def alias(self,alias,entity_id,evidence,confidence=1.0):
   if not evidence or confidence<.6:raise ValueError('alias_evidence_required')
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    old=c.execute('SELECT entity_id FROM world_aliases WHERE alias=?',(alias,)).fetchone()
    if old and old['entity_id']!=entity_id: raise ValueError('ambiguous_alias')
    c.execute('INSERT OR REPLACE INTO world_aliases(alias,entity_id,confidence,evidence_json) VALUES(?,?,?,?)',(alias,entity_id,confidence,json.dumps(list(evidence))));c.commit()
  def relation(self,subject_id,predicate,object_id,evidence,confidence=.8):
   if not evidence or confidence<.6:raise ValueError('relation_evidence_required')
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    x=c.execute('INSERT INTO world_relations(subject_entity_id,predicate,object_entity_id,evidence_json,confidence,version) VALUES(?,?,?,?,?,1)',(subject_id,predicate,object_id,json.dumps(list(evidence)),confidence));c.commit();return x.lastrowid
  def resolve_query(self,query:str):
   q=(query or '').casefold().replace('زیرو','zero'); predicate=None
   for phrase,pred in {'از چی استفاده':'uses_library','جزو کدام':'has_component','چه ارتباط':'related','ارائه‌دهنده':'provided_by','مال کدام شرکت':'developed_by'}.items():
    if phrase in q: predicate=pred; break
-  with self._c() as c: entities=c.execute("SELECT * FROM world_entities WHERE status='active'").fetchall(); aliases=c.execute('SELECT * FROM world_aliases').fetchall()
+  with sqlite_txn(self._c()) as c: entities=c.execute("SELECT * FROM world_entities WHERE status='active'").fetchall(); aliases=c.execute('SELECT * FROM world_aliases').fetchall()
   best=[]
   for e in entities:
    names=[e['canonical_name']]+[a['alias'] for a in aliases if a['entity_id']==e['id']]
@@ -40,7 +41,7 @@ class WorldModel:
    if score: best.append((score,e))
   if not best:return None
   e=max(best,key=lambda x:x[0])[1]
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    sql="SELECT r.*,s.canonical_name subject_name,o.canonical_name object_name FROM world_relations r JOIN world_entities s ON s.id=r.subject_entity_id JOIN world_entities o ON o.id=r.object_entity_id WHERE r.status='active' AND (r.subject_entity_id=? OR r.object_entity_id=?)"
    args=[e['id'],e['id']]
    if predicate: sql+=' AND r.predicate=?';args.append(predicate)
@@ -53,7 +54,7 @@ class WorldModel:
   return {'entity':dict(e),'relations':[dict(r)|{'evidence':json.loads(r['evidence_json'])} for r in rs[:5]]}
 
  def retrieve(self,name):
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    e=c.execute('SELECT * FROM world_entities WHERE canonical_name=? OR id=(SELECT entity_id FROM world_aliases WHERE alias=?)',(name,name)).fetchone()
    if not e:return None
    rs=c.execute("SELECT r.*,s.canonical_name subject_name,o.canonical_name object_name FROM world_relations r JOIN world_entities s ON s.id=r.subject_entity_id JOIN world_entities o ON o.id=r.object_entity_id WHERE r.subject_entity_id=? AND r.status='active'",(e['id'],)).fetchall()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from zero.sqlite_tx import sqlite_txn
 import asyncio
 import time
 from types import SimpleNamespace
@@ -117,7 +118,7 @@ async def test_library_rejects_spam_even_when_quality_is_high(tmp_path):
 async def test_send_policy_counts_the_full_hour_not_two_minutes(tmp_path):
     store = ZeroStore(str(tmp_path / "hour.db"))
     await store.record_sticker_send(5, -1001)
-    with store._conn() as conn:
+    with sqlite_txn(store._conn()) as conn:
         conn.execute("UPDATE sticker_send_history SET sent_at=?", (int(time.time()) - 1800,))
         conn.commit()
 

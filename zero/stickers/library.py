@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..sqlite_tx import sqlite_txn
 import logging
 import random
 from typing import Optional
@@ -191,7 +192,7 @@ class StickerLibrary:
         min_quality: float = 0.3,
     ) -> dict:
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 total_before = conn.execute("SELECT COUNT(*) FROM stickers").fetchone()[0]
                 deleted_nsfw = conn.execute(
                     "DELETE FROM stickers WHERE nsfw_score > ?", (nsfw_threshold,)

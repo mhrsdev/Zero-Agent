@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .sqlite_tx import sqlite_txn
 import json, sqlite3, time, re
 from pathlib import Path
 SCHEMA='''
@@ -15,10 +16,10 @@ class ProceduralMemory:
   c=sqlite3.connect(self.db_path,timeout=5);c.row_factory=sqlite3.Row;c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');return c
  def candidate(self,name,steps,evidence,risk_level='normal'):
   if not steps or not evidence or risk_level not in {'low','normal','high'}:raise ValueError('invalid_procedure_candidate')
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    x=c.execute('INSERT INTO procedural_memory_candidates(name,steps_json,risk_level,evidence_json,created_at) VALUES(?,?,?,?,?)',(name,json.dumps(list(steps)),risk_level,json.dumps(list(evidence)),int(time.time())));c.commit();return x.lastrowid
  def approve(self,candidate_id,reviewer_id):
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    row=c.execute("SELECT * FROM procedural_memory_candidates WHERE id=? AND status='pending'",(candidate_id,)).fetchone()
    if not row:raise ValueError('candidate_not_found')
    active=c.execute("SELECT * FROM procedural_memory WHERE name=? AND status='active' ORDER BY version DESC LIMIT 1",(row['name'],)).fetchone()
@@ -28,16 +29,16 @@ class ProceduralMemory:
    v=(c.execute('SELECT COALESCE(MAX(version),0) v FROM procedural_memory WHERE name=?',(row['name'],)).fetchone()['v'] or 0)+1
    x=c.execute('INSERT INTO procedural_memory(name,steps_json,risk_level,version,approved_by,approved_at) VALUES(?,?,?,?,?,?)',(row['name'],row['steps_json'],row['risk_level'],v,reviewer_id,int(time.time())));c.execute("UPDATE procedural_memory_candidates SET status='approved' WHERE id=?",(candidate_id,));c.commit();return x.lastrowid
  def reject(self,candidate_id:int,reviewer_id:int):
-  with self._c() as c:c.execute("UPDATE procedural_memory_candidates SET status='rejected' WHERE id=? AND status='pending'",(candidate_id,));c.commit()
+  with sqlite_txn(self._c()) as c:c.execute("UPDATE procedural_memory_candidates SET status='rejected' WHERE id=? AND status='pending'",(candidate_id,));c.commit()
  def deprecate(self,procedure_id:int,reviewer_id:int):
-  with self._c() as c:c.execute("UPDATE procedural_memory SET status='deprecated' WHERE id=? AND status='active'",(procedure_id,));c.commit()
+  with sqlite_txn(self._c()) as c:c.execute("UPDATE procedural_memory SET status='deprecated' WHERE id=? AND status='active'",(procedure_id,));c.commit()
  def inspect(self,procedure_id:int):
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    r=c.execute('SELECT * FROM procedural_memory WHERE id=?',(procedure_id,)).fetchone(); return dict(r)|{'steps':json.loads(r['steps_json'])} if r else None
  def retrieve(self,name:str):
   q=set(re.findall(r'[a-z0-9_]{3,}|[آ-ی]{3,}',(name or '').casefold()))
   if any(x in q for x in ('دیباگ','debug','خطا','باگ')): q.update({'debug','workflow'})
-  with self._c() as c: rows=c.execute("SELECT * FROM procedural_memory WHERE status='active' ORDER BY version DESC").fetchall()
+  with sqlite_txn(self._c()) as c: rows=c.execute("SELECT * FROM procedural_memory WHERE status='active' ORDER BY version DESC").fetchall()
   ranked=[]
   for r in rows:
    hay=' '.join((r['name'],r['steps_json'],r['risk_level'])).casefold(); score=len(q & set(re.findall(r'[a-z0-9_]{3,}|[آ-ی]{3,}',hay)))
@@ -46,5 +47,5 @@ class ProceduralMemory:
   r=max(ranked,key=lambda x:x[0])[1]; return dict(r)|{'steps':json.loads(r['steps_json'])}
  def record(self,procedure_id,trace_id,status,error_type=None):
   if status not in {'success','failure'}:raise ValueError('invalid_run_status')
-  with self._c() as c:
+  with sqlite_txn(self._c()) as c:
    c.execute('INSERT INTO procedural_memory_runs(procedure_id,trace_id,status,created_at,error_type) VALUES(?,?,?,?,?)',(procedure_id,trace_id,status,int(time.time()),error_type));c.execute(f'UPDATE procedural_memory SET {"success_count" if status=="success" else "failure_count"}={"success_count" if status=="success" else "failure_count"}+1 WHERE id=?',(procedure_id,));c.commit()

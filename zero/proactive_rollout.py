@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import hashlib
 import os
 import sqlite3
@@ -43,14 +44,14 @@ class RolloutController:
         if self.canary_percent not in CANARY_LEVELS:self.canary_percent=0;self.config_sane=False
     def _schema(self):
         now=int(time.time())
-        with self.store._conn() as c:
+        with sqlite_txn(self.store._conn()) as c:
             c.execute("CREATE TABLE IF NOT EXISTS proactive_rollout_state(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL)")
             c.execute("CREATE TABLE IF NOT EXISTS proactive_rollout_counters(name TEXT PRIMARY KEY,value INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)")
             c.execute("INSERT INTO proactive_rollout_state VALUES('migration_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(self.MIGRATION_VERSION,now))
             for name in COUNTERS:c.execute("INSERT OR IGNORE INTO proactive_rollout_counters VALUES(?,0,?)",(name,now))
     def _count(self,name,amount=1):
         if name not in COUNTERS:return
-        with self.store._conn() as c:c.execute("UPDATE proactive_rollout_counters SET value=value+?,updated_at=? WHERE name=?",(int(amount),int(time.time()),name))
+        with sqlite_txn(self.store._conn()) as c:c.execute("UPDATE proactive_rollout_counters SET value=value+?,updated_at=? WHERE name=?",(int(amount),int(time.time()),name))
     @staticmethod
     def bucket(user_id):return int(hashlib.sha256(('zero-proactive-canary-v1:'+str(int(user_id))).encode()).hexdigest()[:8],16)%10000
     def decide(self,chat_id,user_id):
@@ -64,16 +65,16 @@ class RolloutController:
         if bucket>=self.canary_percent*100:return RolloutDecision(False,'canary_reject',bucket)
         self._count('canary_accepts');return RolloutDecision(True,'allowed',bucket)
     def heartbeat(self):
-        with self.store._conn() as c:c.execute("INSERT INTO proactive_rollout_state VALUES('scheduler_heartbeat','alive',?) ON CONFLICT(key) DO UPDATE SET value='alive',updated_at=excluded.updated_at",(int(time.time()),))
+        with sqlite_txn(self.store._conn()) as c:c.execute("INSERT INTO proactive_rollout_state VALUES('scheduler_heartbeat','alive',?) ON CONFLICT(key) DO UPDATE SET value='alive',updated_at=excluded.updated_at",(int(time.time()),))
     def record_send(self,real):self._count('real_sends' if real else 'mock_sends')
     def metrics(self):
-        with self.store._conn() as c:return {r['name']:int(r['value']) for r in c.execute('select name,value from proactive_rollout_counters')}
+        with sqlite_txn(self.store._conn()) as c:return {r['name']:int(r['value']) for r in c.execute('select name,value from proactive_rollout_counters')}
 
 class ProactiveProductionHealth:
     def __init__(self,store,rollout,transport):self.store,self.rollout,self.transport=store,rollout,transport
     def check(self,now=None):
         now=int(now if now is not None else time.time());checks={}
-        with self.store._conn() as c:
+        with sqlite_txn(self.store._conn()) as c:
             heartbeat=c.execute("select updated_at from proactive_rollout_state where key='scheduler_heartbeat'").fetchone();checks['scheduler_alive']=bool(heartbeat and now-int(heartbeat[0])<=3660)
             checks['lease_cleanup']=c.execute("select count(*) from proactive_followups where status='evaluating' and lease_until<?",(now,)).fetchone()[0]==0
             checks['outbox_consistency']=c.execute("select count(*) from proactive_followup_outbox where send_state not in ('reserved','sending','sent','retryable_failed','permanent_failed','ambiguous') or (send_state='sent' and receipt is null)").fetchone()[0]==0

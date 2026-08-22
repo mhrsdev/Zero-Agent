@@ -1,3 +1,4 @@
+from zero.sqlite_tx import sqlite_txn
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,25 +35,25 @@ def test_dry_run_is_one_topic_and_does_not_store(tmp_path: Path):
         assert router.structured_calls == 1
         assert result['topics'] == 1
         assert result['accepted_count'] == 1
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             assert conn.execute('SELECT COUNT(*) c FROM knowledge_items').fetchone()['c'] == 0
     asyncio.run(scenario())
 
 
 def test_production_dedup_and_retrieval_are_separate_from_memory(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(knowledge, "_memory_available_ok", lambda: True)
-    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (0.0, 0.0, 0.0), raising=False)
     async def scenario():
         store = ZeroStore(str(tmp_path / 'zero.db'))
         worker = KnowledgeWorker(store, FakeWeb(), FakeRouter())
         first = await worker.run_nightly(topic_limit=1)
         async with store._lock:
-            with store._conn() as conn:
+            with sqlite_txn(store._conn()) as conn:
                 conn.execute("UPDATE knowledge_topics SET enabled=CASE WHEN id=1 THEN 1 ELSE 0 END")
                 conn.commit()
         second = await worker.run_nightly(topic_limit=1)
         assert first['accepted_count'] == second['accepted_count'] == 1
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             assert conn.execute('SELECT COUNT(*) c FROM knowledge_items').fetchone()['c'] == 1
             assert conn.execute('SELECT COUNT(*) c FROM knowledge_sources').fetchone()['c'] == 1
             assert conn.execute('SELECT COUNT(*) c FROM memory_items').fetchone()['c'] == 0
@@ -93,7 +94,7 @@ def test_telegram_candidate_queue_is_bounded_and_processed(tmp_path: Path):
         worker = KnowledgeWorker(store, FakeWeb(), BackendRouter())
         result = await worker.process_telegram_candidates('run', 'trace', budget=1)
         assert result['accepted'] == 1 and result['calls'] == 1
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             assert conn.execute("SELECT COUNT(*) c FROM knowledge_items WHERE topic_id IN (SELECT id FROM knowledge_topics WHERE topic='Telegram Search')").fetchone()['c'] == 1
             assert conn.execute("SELECT COUNT(*) c FROM memory_items").fetchone()['c'] == 0
     asyncio.run(scenario())
@@ -118,7 +119,7 @@ def test_web_candidate_queue_dedup_restart_and_nightly_batch(tmp_path: Path):
 
 def test_resource_pressure_skip_keeps_stable_result_schema(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(knowledge, "_memory_available_ok", lambda: True)
-    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (10**6, 0.0, 0.0))
+    monkeypatch.setattr(knowledge.os, "getloadavg", lambda: (10**6, 0.0, 0.0), raising=False)
     async def scenario():
         store = ZeroStore(str(tmp_path / "zero.db"))
         result = await KnowledgeWorker(store, FakeWeb(), FakeRouter()).run_nightly(topic_limit=1)

@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+from .fsprivacy import restrict_private_path
 from .world_model import WorldModel
 
 CATEGORIES = {
@@ -74,7 +75,7 @@ class TelegramSourceManager:
 
     def save_manifest(self, rows: list[dict[str, Any]]) -> None:
         self.manifest_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.manifest_path.chmod(0o600)
+        restrict_private_path(self.manifest_path)
 
     def load_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -83,7 +84,7 @@ class TelegramSourceManager:
 
     def save_state(self, state: dict[str, Any]) -> None:
         self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.state_path.chmod(0o600)
+        restrict_private_path(self.state_path)
 
     async def discover_web(self, web, *, per_category: int = 25) -> list[dict[str, Any]]:
         rows = self.load_manifest()

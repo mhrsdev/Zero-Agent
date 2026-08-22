@@ -1,3 +1,4 @@
+from zero.sqlite_tx import sqlite_txn
 import asyncio
 import json
 from pathlib import Path
@@ -38,6 +39,6 @@ def test_history_is_idempotent(tmp_path: Path):
         assert await store.github_trending_seen("acme/one") is True
         await store.github_trending_mark("acme/one", rank=1, fingerprint="abc", source_url="https://github.ranbot.online/")
         async with store._lock:
-            with store._conn() as conn:
+            with sqlite_txn(store._conn()) as conn:
                 assert conn.execute("SELECT COUNT(*) FROM github_trending_items").fetchone()[0] == 1
     asyncio.run(scenario())

@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 import re
-import resource
+try:
+    import resource  # POSIX only; guarded so the module imports on Windows.
+except ImportError:  # pragma: no cover - Windows has no resource module
+    resource = None
 import shutil
 import signal
 import subprocess
@@ -138,7 +141,7 @@ class OfficeCliAdapter:
             if not item or item.startswith("--"):
                 continue
             candidate = Path(item)
-            if candidate.is_absolute():
+            if candidate.is_absolute() or item.startswith("/"):
                 try:
                     candidate.resolve().relative_to(root)
                 except ValueError as exc:
@@ -147,6 +150,8 @@ class OfficeCliAdapter:
     def _preexec(self) -> None:
         limits = self.config.limits
         os.setsid()
+        if resource is None:  # pragma: no cover - non-POSIX platform
+            return
         resource.setrlimit(resource.RLIMIT_CPU, (limits.max_cpu_seconds, limits.max_cpu_seconds + 1))
         # Do not use RLIMIT_AS here: Chrome reserves a very large sparse virtual
         # address space and fails before rendering under a small address-space
@@ -161,9 +166,11 @@ class OfficeCliAdapter:
         os.umask(0o077)
 
     def run_cli(self, args: list[str], *, expect_json: bool = False) -> dict[str, Any] | str:
+        # Validate the workspace boundary first: an escape attempt must be
+        # reported as such even when the CLI binary itself is unavailable.
+        self._ensure_workspace_args(args)
         if not self.cli.is_absolute() or not self.cli.exists() or not os.access(self.cli, os.X_OK):
             raise AdapterError("officecli_unavailable")
-        self._ensure_workspace_args(args)
         env = {
             "PATH": "/usr/bin:/bin",
             "HOME": str(self.workspace.working),
@@ -173,16 +180,21 @@ class OfficeCliAdapter:
             "OFFICECLI_NO_AUTO_RESIDENT": "1",
             "DOTNET_EnableDiagnostics": "0",
         }
+        posix = os.name == "posix"
         process = subprocess.Popen(
             [str(self.cli), *args], cwd=self.workspace.working, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            shell=False, start_new_session=False, preexec_fn=self._preexec,
+            shell=False, start_new_session=False,
+            preexec_fn=self._preexec if posix else None,
         )
         try:
             stdout, _stderr = process.communicate(timeout=self.config.limits.max_runtime_seconds)
         except subprocess.TimeoutExpired as exc:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:  # Windows: no process groups; kill the direct child.
+                    process.kill()
                 process.communicate(timeout=5)
             except (OSError, subprocess.SubprocessError):
                 pass

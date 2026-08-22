@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from contextlib import contextmanager
 import sqlite3
 import time
 from pathlib import Path
@@ -110,8 +111,20 @@ class PanelStore:
         db.row_factory = sqlite3.Row
         return db
 
+    @contextmanager
+    def _conn(self):
+        # sqlite3's connection context manager only wraps a transaction; it
+        # never closes the connection. On Windows an open handle keeps the DB
+        # file locked and breaks rollback/cleanup paths that unlink the file.
+        db = self._connect()
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
     def _init(self) -> None:
-        with self._connect() as db:
+        with self._conn() as db:
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS panel_admins (
@@ -146,7 +159,7 @@ class PanelStore:
 
     def snapshot_setup_state(self) -> tuple[str, int, str, int]:
         """Capture the wizard row so a coordinated setup can be compensated."""
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute(
                 "SELECT current_step, completed, data_json, updated_at FROM panel_setup WHERE id=1"
             ).fetchone()
@@ -156,7 +169,7 @@ class PanelStore:
 
     def restore_setup_state(self, snapshot: tuple[str, int, str, int]) -> None:
         """Restore only wizard progress, leaving administrators and sessions intact."""
-        with self._connect() as db:
+        with self._conn() as db:
             db.execute(
                 "UPDATE panel_setup SET current_step=?, completed=?, data_json=?, updated_at=? WHERE id=1",
                 snapshot,
@@ -293,7 +306,7 @@ class PanelStore:
         if not username or len(username) > 120:
             raise ValueError("username is required")
         try:
-            with self._connect() as db:
+            with self._conn() as db:
                 cur = db.execute(
                     "INSERT INTO panel_admins(username,password_hash,must_change_password,created_at) VALUES(?,?,?,?)",
                     (username, _hash_password(password, allow_weak=(must_change_password and username == "admin" and password == "Admin")), int(must_change_password), int(time.time())),
@@ -303,26 +316,26 @@ class PanelStore:
             raise DuplicateAdminError("administrator already exists") from exc
 
     def change_admin_password(self, admin_id: int, current_password: str, new_password: str) -> None:
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute("SELECT password_hash FROM panel_admins WHERE id=? AND disabled=0", (admin_id,)).fetchone()
             if not row or not _verify_password(current_password, row["password_hash"]):
                 raise ValueError("current password is incorrect")
             db.execute("UPDATE panel_admins SET password_hash=?,must_change_password=0 WHERE id=?", (_hash_password(new_password), admin_id))
 
     def verify_admin(self, username: str, password: str) -> dict[str, Any] | None:
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute("SELECT * FROM panel_admins WHERE username=? AND disabled=0", (username.strip().lower(),)).fetchone()
         return dict(row) if row and _verify_password(password, row["password_hash"]) else None
 
     def create_session(self, admin_id: int, ttl_seconds: int = 86400) -> tuple[str, str]:
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         now = int(time.time())
-        with self._connect() as db:
+        with self._conn() as db:
             db.execute("INSERT INTO panel_sessions VALUES(?,?,?,?,?)", (self._token_hash(token), admin_id, csrf, now, now + ttl_seconds))
         return token, csrf
 
     def get_session(self, token: str) -> dict[str, Any] | None:
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute(
                 "SELECT s.*, a.username, a.role, a.must_change_password FROM panel_sessions s JOIN panel_admins a ON a.id=s.admin_id WHERE s.token_hash=? AND s.expires_at>? AND a.disabled=0",
                 (self._token_hash(token), int(time.time())),
@@ -330,11 +343,11 @@ class PanelStore:
         return dict(row) if row else None
 
     def revoke_session(self, token: str) -> None:
-        with self._connect() as db:
+        with self._conn() as db:
             db.execute("DELETE FROM panel_sessions WHERE token_hash=?", (self._token_hash(token),))
 
     def get_setup_state(self) -> dict[str, Any]:
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute("SELECT * FROM panel_setup WHERE id=1").fetchone()
         data = json.loads(row["data_json"])
         return {"current_step": row["current_step"], "completed": bool(row["completed"]), "data": _strip_secrets(data), "updated_at": row["updated_at"]}
@@ -354,7 +367,7 @@ class PanelStore:
                 )
                 if "telegram" not in state.completed_steps:
                     raise ValueError("telegram setup validation failed")
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute("SELECT data_json FROM panel_setup WHERE id=1").fetchone()
             current = json.loads(row["data_json"])
             current[step] = _strip_secrets(data)
@@ -363,7 +376,7 @@ class PanelStore:
             db.execute("UPDATE panel_setup SET current_step=?,data_json=?,completed=?,updated_at=? WHERE id=1", (next_step, json.dumps(current), int(step == "start"), int(time.time())))
 
     def skip_setup(self) -> None:
-        with self._connect() as db:
+        with self._conn() as db:
             row = db.execute("SELECT data_json FROM panel_setup WHERE id=1").fetchone()
             data = json.loads(row["data_json"])
             data["skipped"] = {"reason": "existing installation", "updated_at": int(time.time())}

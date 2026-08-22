@@ -5,6 +5,7 @@ separate queue only if reminder throughput or concurrent chats requires it.
 """
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import json
 import logging
 import re
@@ -116,7 +117,7 @@ class DeferredMemory:
 
     def _pending(self, chat_id: int, sender_id: int):
         cutoff = _now() - self.CONTINUATION_TTL
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             row = con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? AND status='collecting' AND updated_at>=? ORDER BY updated_at DESC LIMIT 1", (chat_id, sender_id, cutoff)).fetchone()
             con.execute("UPDATE deferred_memories SET status='cancelled',updated_at=? WHERE chat_id=? AND sender_id=? AND status='collecting' AND updated_at<?", (_now(), chat_id, sender_id, cutoff))
             con.commit()
@@ -130,11 +131,11 @@ class DeferredMemory:
 
     def _save(self, data: dict[str, Any]) -> None:
         now = _now()
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute("""INSERT INTO deferred_memories(chat_id,sender_id,source_message_id,source_trace_id,kind,status,title,details,due_at,reminder_job_id,state_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (data['chat_id'],data['sender_id'],data.get('source_message_id'),data.get('source_trace_id',''),data.get('kind','reminder'),data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),data.get('reminder_job_id'),json.dumps(data.get('state',{}),ensure_ascii=False),now,now))
 
     def _update(self, item_id: int, data: dict[str, Any]) -> None:
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute("UPDATE deferred_memories SET status=?,title=?,details=?,due_at=?,state_json=?,updated_at=? WHERE id=?", (data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),json.dumps(data.get('state',{}),ensure_ascii=False),_now(),item_id))
 
     def _is_continuation(self, message: IncomingMessage, row: dict[str, Any]) -> bool:
@@ -186,7 +187,7 @@ class DeferredMemory:
         if not text or is_sensitive_memory_text(text) or len(text) < 8 or not re.search(r"یادت باشه|نکته\s*:|دوست دارم|دوست ندارم|شخصیتم", text, re.I): return
         section = 'likes' if 'دوست دارم' in text else 'dislikes' if 'دوست ندارم' in text else 'notes'
         estimate = max(1, len(text) // 4)
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             total = con.execute("SELECT COALESCE(SUM(token_estimate),0) FROM user_memory_notes WHERE chat_id=? AND sender_id=? AND status='active'", (message.chat_id,message.sender_id)).fetchone()[0]
             if total + estimate > 10000: return
             con.execute("INSERT INTO user_memory_notes(chat_id,sender_id,section,content,token_estimate,source_message_id,created_at) VALUES(?,?,?,?,?,?,?)", (message.chat_id,message.sender_id,section,text[:1200],estimate,message.message_id,_now()))
@@ -251,11 +252,11 @@ class DeferredMemory:
             self._update(row['id'], {**row, **data})
             ready = self._row(self._pending(message.chat_id, message.sender_id))
             if not ready:
-                with self._conn() as con:
+                with sqlite_txn(self._conn()) as con:
                     ready = self._row(con.execute("SELECT * FROM deferred_memories WHERE id=?", (row['id'],)).fetchone())
         else:
             self._save({'chat_id': message.chat_id, 'sender_id': message.sender_id, 'source_message_id': message.message_id, 'source_trace_id': message.trace_id or '', **data})
-            with self._conn() as con:
+            with sqlite_txn(self._conn()) as con:
                 ready = self._row(con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? ORDER BY id DESC LIMIT 1", (message.chat_id, message.sender_id)).fetchone())
         return str(plan.get('reply') or '').strip()[:500], {'ready': ready} if ready else None
 
@@ -268,14 +269,14 @@ class DeferredMemory:
         text = f"{sender_label} یادت نره: {row.get('title') or row.get('details','')[:240]}".strip()
         now = _now()
         schedule = {'kind': 'once', 'at': due_at, 'timezone': 'Asia/Tehran', 'explanation': 'one-shot reminder'}
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute("INSERT INTO cron_jobs(job_id,version,template_id,template_version,owner_user_id,created_by_user_id,chat_id,title,input_json,schedule_json,risk_level,approval_state,state,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id,1,'reminder','1.0.0',owner_id,row['sender_id'],row['chat_id'], 'deferred reminder', json.dumps({'text': text},ensure_ascii=False), json.dumps(schedule,ensure_ascii=False), 'low','approved','enabled',due_at,now,now))
             con.execute("UPDATE deferred_memories SET status='scheduled',reminder_job_id=?,updated_at=? WHERE id=?", (job_id,now,row['id']))
         return job_id
 
     def notes_context(self, message: IncomingMessage, limit: int = 6) -> str:
         words = {w for w in re.findall(r"[\w\u0600-\u06ff]{3,}", _norm(message.text))}
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             rows = con.execute("SELECT id,section,content FROM user_memory_notes WHERE chat_id=? AND sender_id=? AND status='active' ORDER BY created_at DESC LIMIT 100", (message.chat_id,message.sender_id)).fetchall()
             selected = [row for row in rows if not words or words & set(re.findall(r"[\w\u0600-\u06ff]{3,}", _norm(row[2])))] [:limit]
             if selected:

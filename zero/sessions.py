@@ -1,6 +1,7 @@
 """Secure local registry and attended Telegram login for Zero sessions."""
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import asyncio
 import os
 import re
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
+from .fsprivacy import restrict_private_path
 from .paths import zero_home
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -86,11 +88,11 @@ class SessionRegistry:
         self.db_path = self.root / "registry.db"
         self.root.mkdir(parents=True, exist_ok=True)
         self.files_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.root, 0o700)
-        os.chmod(self.files_dir, 0o700)
-        with self._conn() as db:
+        restrict_private_path(self.root, directory=True)
+        restrict_private_path(self.files_dir, directory=True)
+        with sqlite_txn(self._conn()) as db:
             db.executescript(_SCHEMA)
-        os.chmod(self.db_path, 0o600)
+        restrict_private_path(self.db_path)
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
@@ -129,7 +131,7 @@ class SessionRegistry:
             raise SessionRegistryError("managed session path escaped its protected directory")
         now = time.time()
         try:
-            with self._conn() as db:
+            with sqlite_txn(self._conn()) as db:
                 db.execute(
                     "INSERT INTO sessions(session_id,label,session_path,state,active,managed,created_at,updated_at) VALUES(?,?,?,?,0,?,?,?)",
                     (session_id, str(label or session_id).strip(), str(path), "new", int(managed), now, now),
@@ -140,19 +142,19 @@ class SessionRegistry:
 
     def get(self, session_id: str) -> SessionRecord:
         session_id = self._validate_id(session_id)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if row is None:
             raise SessionRegistryError("unknown session")
         return self._record(row)
 
     def list(self) -> list[SessionRecord]:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute("SELECT * FROM sessions ORDER BY active DESC, session_id").fetchall()
         return [self._record(row) for row in rows]
 
     def active(self) -> SessionRecord | None:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute("SELECT * FROM sessions WHERE active=1").fetchone()
         return self._record(row) if row is not None else None
 
@@ -160,7 +162,7 @@ class SessionRegistry:
         if state not in _SESSION_STATES:
             raise SessionRegistryError("invalid session state")
         safe_error = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(last_error))[:80]
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             result = db.execute(
                 "UPDATE sessions SET state=?,last_error=?,active=CASE WHEN ?=1 THEN active ELSE 0 END,updated_at=? WHERE session_id=?",
                 (state, safe_error, int(state == "authorized"), time.time(), self._validate_id(session_id)),
@@ -171,7 +173,7 @@ class SessionRegistry:
 
     def mark_authorized(self, session_id: str, *, user_id: int | None, username: str = "") -> SessionRecord:
         safe_username = re.sub(r"[^A-Za-z0-9_]", "", str(username or ""))[:64]
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             result = db.execute(
                 "UPDATE sessions SET state=?,user_id=?,username=?,last_error=?,updated_at=? WHERE session_id=?",
                 ("authorized", int(user_id) if user_id is not None else None, safe_username, "", time.time(), self._validate_id(session_id)),
@@ -190,7 +192,10 @@ class SessionRegistry:
     def _secure_session_files(cls, base: Path) -> None:
         for path in cls._candidate_files(base):
             if path.is_file() and not path.is_symlink():
-                os.chmod(path, 0o600)
+                try:
+                    restrict_private_path(path)
+                except PermissionError:
+                    pass
 
     @classmethod
     def _session_exists(cls, base: Path) -> bool:
@@ -202,7 +207,7 @@ class SessionRegistry:
             raise SessionRegistryError("only an authorized session can become active")
         if not self._session_exists(record.session_path):
             raise SessionRegistryError("authorized session file is missing")
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE sessions SET active=0,updated_at=? WHERE active=1", (time.time(),))
             db.execute("UPDATE sessions SET active=1,updated_at=? WHERE session_id=?", (time.time(), record.session_id))
@@ -211,7 +216,7 @@ class SessionRegistry:
 
     def deactivate(self, session_id: str) -> SessionRecord:
         record = self.get(session_id)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("UPDATE sessions SET active=0,updated_at=? WHERE session_id=?", (time.time(), record.session_id))
         return self.get(record.session_id)
 
@@ -231,7 +236,7 @@ class SessionRegistry:
             for path in self._candidate_files(record.session_path):
                 if path.is_symlink() or path.is_file():
                     path.unlink()
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("DELETE FROM sessions WHERE session_id=?", (record.session_id,))
 
 

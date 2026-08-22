@@ -11,6 +11,7 @@ never by itself consent to operate in it.
 """
 from __future__ import annotations
 
+from ..sqlite_tx import sqlite_txn
 import json
 import sqlite3
 import time
@@ -132,7 +133,7 @@ class TenancyRegistry:
     def __init__(self, path: str | Path):
         self.path = expand(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.executescript(SCHEMA)
 
     def _conn(self) -> sqlite3.Connection:
@@ -145,14 +146,14 @@ class TenancyRegistry:
     # ---- installations -------------------------------------------------
 
     def create_installation(self, installation_id: str, *, label: str = "") -> None:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT OR IGNORE INTO installations(installation_id,label,created_at) VALUES(?,?,?)",
                 (installation_id, label, time.time()),
             )
 
     def installations(self) -> list[str]:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             return [r["installation_id"] for r in db.execute("SELECT installation_id FROM installations ORDER BY installation_id")]
 
     # ---- group lifecycle -----------------------------------------------
@@ -163,7 +164,7 @@ class TenancyRegistry:
     ) -> Group:
         """Record a newly seen group as PENDING. Never auto-approves."""
         self.create_installation(installation_id)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT OR IGNORE INTO groups(installation_id,group_id,platform,platform_chat_id,title,state,discovered_at) VALUES(?,?,?,?,?,?,?)",
                 (installation_id, group_id, platform, platform_chat_id, title, GroupState.PENDING.value, time.time()),
@@ -171,7 +172,7 @@ class TenancyRegistry:
         return self.get_group(installation_id, group_id)
 
     def get_group(self, installation_id: str, group_id: str) -> Group:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT * FROM groups WHERE installation_id=? AND group_id=?",
                 (installation_id, group_id),
@@ -189,7 +190,7 @@ class TenancyRegistry:
         if state is not None:
             query += " AND state=?"
             params.append(state.value)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute(query + " ORDER BY group_id", params).fetchall()
         return [
             Group(r["installation_id"], r["group_id"], r["platform"], r["platform_chat_id"], r["title"], GroupState(r["state"]))
@@ -206,7 +207,7 @@ class TenancyRegistry:
         if not can_transition(current.state, target):
             raise GroupStateError(f"illegal transition {current.state.value} -> {target.value}")
         approved = time.time() if target is GroupState.ACTIVE else None
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "UPDATE groups SET state=?, approved_at=COALESCE(?,approved_at) WHERE installation_id=? AND group_id=?",
                 (target.value, approved, scope.installation_id, scope.group_id),
@@ -223,7 +224,7 @@ class TenancyRegistry:
     # ---- membership and permissions ------------------------------------
 
     def add_member(self, scope: Scope, user_id: int, role: Role) -> None:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT INTO memberships(installation_id,group_id,user_id,role,added_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(installation_id,group_id,user_id) DO UPDATE SET role=excluded.role",
@@ -231,7 +232,7 @@ class TenancyRegistry:
             )
 
     def remove_member(self, scope: Scope, user_id: int) -> None:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "DELETE FROM memberships WHERE installation_id=? AND group_id=? AND user_id=?",
                 (scope.installation_id, scope.group_id, int(user_id)),
@@ -241,7 +242,7 @@ class TenancyRegistry:
         target = scope.user_id if user_id is None else user_id
         if target is None:
             return None
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT role FROM memberships WHERE installation_id=? AND group_id=? AND user_id=?",
                 (scope.installation_id, scope.group_id, int(target)),
@@ -249,7 +250,7 @@ class TenancyRegistry:
         return Role(row["role"]) if row else None
 
     def members(self, scope: Scope) -> dict[int, Role]:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute(
                 "SELECT user_id, role FROM memberships WHERE installation_id=? AND group_id=? ORDER BY user_id",
                 (scope.installation_id, scope.group_id),
@@ -274,7 +275,7 @@ class TenancyRegistry:
         if key not in GROUP_SETTING_KEYS:
             raise ValueError(f"unknown group setting: {key}")
         self.require(scope.for_user(actor_id if actor_id is not None else scope.user_id), Permission.MANAGE_SETTINGS)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT INTO group_settings(installation_id,group_id,key,value_json,updated_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(installation_id,group_id,key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
@@ -282,7 +283,7 @@ class TenancyRegistry:
             )
 
     def get_setting(self, scope: Scope, key: str, default: Any = None) -> Any:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT value_json FROM group_settings WHERE installation_id=? AND group_id=? AND key=?",
                 (scope.installation_id, scope.group_id, key),
@@ -290,7 +291,7 @@ class TenancyRegistry:
         return json.loads(row["value_json"]) if row else default
 
     def settings(self, scope: Scope) -> dict[str, Any]:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute(
                 "SELECT key, value_json FROM group_settings WHERE installation_id=? AND group_id=?",
                 (scope.installation_id, scope.group_id),
@@ -314,7 +315,7 @@ class TenancyRegistry:
     def set_quota(self, scope: Scope, resource: str, limit: int, *, period: str = "day") -> None:
         resource, period, parsed = self._validate_quota(resource, period, limit)
         self.get_group(scope.installation_id, scope.group_id)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT INTO group_quotas(installation_id,group_id,resource,period,limit_value) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(installation_id,group_id,resource,period) DO UPDATE SET limit_value=excluded.limit_value",
@@ -324,7 +325,7 @@ class TenancyRegistry:
     def set_quotas(self, scope: Scope, resource: str, limits: dict[str, int]) -> None:
         self.get_group(scope.installation_id, scope.group_id)
         parsed = [self._validate_quota(resource, period, limit) for period, limit in limits.items()]
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for item_resource, period, limit in parsed:
@@ -340,7 +341,7 @@ class TenancyRegistry:
 
     def quotas(self, scope: Scope, resource: str) -> dict[str, int]:
         resource = str(resource or "").strip()
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute(
                 "SELECT period,limit_value FROM group_quotas WHERE installation_id=? AND group_id=? AND resource=?",
                 (scope.installation_id, scope.group_id, resource),
@@ -349,7 +350,7 @@ class TenancyRegistry:
         return {period: values[period] for period in QUOTA_PERIODS if period in values}
 
     def get_quota(self, scope: Scope, resource: str, *, period: str = "day") -> int | None:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT limit_value FROM group_quotas WHERE installation_id=? AND group_id=? AND resource=? AND period=?",
                 (scope.installation_id, scope.group_id, resource, period),
@@ -379,7 +380,7 @@ class TenancyRegistry:
             return QuotaDecision(True, None, {}, {})
         buckets = {period: self._bucket(period, now) for period in limits}
         usage: dict[str, int] = {}
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for period in QUOTA_PERIODS:
@@ -414,7 +415,7 @@ class TenancyRegistry:
         limits = self.quotas(scope, resource)
         if not limits or amount == 0:
             return
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for period in limits:
@@ -436,7 +437,7 @@ class TenancyRegistry:
         """
         limit = self.get_quota(scope, resource, period=period)
         bucket = self._bucket(period, now)
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT used FROM usage_records WHERE installation_id=? AND group_id=? AND resource=? AND period=? AND bucket=?",
                 (scope.installation_id, scope.group_id, resource, period, bucket),
@@ -453,7 +454,7 @@ class TenancyRegistry:
         return True, used, limit
 
     def usage(self, scope: Scope, resource: str, *, period: str = "day", now: float | None = None) -> int:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT used FROM usage_records WHERE installation_id=? AND group_id=? AND resource=? AND period=? AND bucket=?",
                 (scope.installation_id, scope.group_id, resource, period, self._bucket(period, now)),
@@ -466,14 +467,14 @@ class TenancyRegistry:
         """Remember a label a user has used in this group, scoped to this group."""
         if not str(label or "").strip():
             return
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             db.execute(
                 "INSERT OR IGNORE INTO identity_history(installation_id,group_id,user_id,label,observed_at) VALUES(?,?,?,?,?)",
                 (scope.installation_id, scope.group_id, int(user_id), str(label), time.time()),
             )
 
     def identity_history(self, scope: Scope, user_id: int) -> list[str]:
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             rows = db.execute(
                 "SELECT label FROM identity_history WHERE installation_id=? AND group_id=? AND user_id=? ORDER BY observed_at",
                 (scope.installation_id, scope.group_id, int(user_id)),
@@ -486,7 +487,7 @@ class TenancyRegistry:
         platform: str = "telegram",
     ) -> Scope:
         """Map a platform chat id to the scope that owns it."""
-        with self._conn() as db:
+        with sqlite_txn(self._conn()) as db:
             row = db.execute(
                 "SELECT group_id FROM groups WHERE installation_id=? AND platform=? AND platform_chat_id=?",
                 (installation_id, platform, int(platform_chat_id)),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import hashlib
 import json
 import logging
@@ -105,7 +106,7 @@ class SemanticUserMemory:
         now = int(time.time())
         value_json = json.dumps(value, ensure_ascii=False)
         source_hash = hashlib.sha256(source_text.encode()).hexdigest()
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute('BEGIN IMMEDIATE')
             existing = con.execute("SELECT id,confidence,evidence_message_ids_json FROM semantic_user_memory_candidates WHERE chat_id=? AND sender_id=? AND category=? AND key=? AND value_json=? AND status='pending' ORDER BY id DESC LIMIT 1", (chat_id, sender_id, category, key, value_json)).fetchone()
             if existing:
@@ -120,7 +121,7 @@ class SemanticUserMemory:
 
     def approve(self, candidate_id: int, reviewer_id: int, ttl_seconds: int | None = None) -> int:
         now = int(time.time())
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute('BEGIN IMMEDIATE')
             row = con.execute("SELECT * FROM semantic_user_memory_candidates WHERE id=? AND status='pending'", (candidate_id,)).fetchone()
             if not row or row['confidence'] < 0.6:
@@ -146,13 +147,13 @@ class SemanticUserMemory:
 
     def audit_event(self, event_type: str, *, item_id: int | None, chat_id: int, sender_id: int, actor_id: int, action: str, reason: str = '', trace_id: str | None = None) -> str:
         trace_id = trace_id or uuid.uuid4().hex
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute('INSERT INTO semantic_memory_audit(event_type,trace_id,item_id,chat_id,sender_id,actor_id,action,reason,timestamp) VALUES(?,?,?,?,?,?,?,?,?)', (event_type, trace_id, item_id, chat_id, sender_id, actor_id, action, reason[:500], int(time.time())))
             con.commit()
         return trace_id
 
     def inspect_for_actor(self, memory_id: int, *, chat_id: int, sender_id: int, actor_id: int, owner_id: int | None = None, trace_id: str | None = None) -> dict:
-        with self._conn() as con: row = con.execute('SELECT * FROM semantic_user_memory WHERE id=?', (memory_id,)).fetchone()
+        with sqlite_txn(self._conn()) as con: row = con.execute('SELECT * FROM semantic_user_memory WHERE id=?', (memory_id,)).fetchone()
         if not row: raise ValueError('memory_not_found')
         override = owner_id is not None and int(actor_id) == int(owner_id)
         if not override and (int(row['chat_id']) != int(chat_id) or int(row['sender_id']) != int(sender_id)):
@@ -177,7 +178,7 @@ class SemanticUserMemory:
 
     def retrieve(self, chat_id: int, sender_id: int, limit: int = 20) -> list[dict]:
         now = int(time.time())
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             rows = con.execute("SELECT * FROM semantic_user_memory WHERE chat_id=? AND sender_id=? AND status='active' AND (expires_at IS NULL OR expires_at>=?) ORDER BY last_verified_at DESC,id DESC LIMIT ?", (chat_id,sender_id,now,limit)).fetchall()
             return [dict(r) | {'value': json.loads(r['value_json']), 'evidence_message_ids': json.loads(r['evidence_message_ids_json'])} for r in rows]
 
@@ -186,7 +187,7 @@ class SemanticUserMemory:
         if SENSITIVE.search(value_json):
             raise ValueError('invalid_or_sensitive_candidate')
         now = int(time.time())
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             con.execute('BEGIN IMMEDIATE')
             row=con.execute('SELECT * FROM semantic_user_memory WHERE id=? AND status="active"',(memory_id,)).fetchone()
             if not row: raise ValueError('memory_not_found')
@@ -201,7 +202,7 @@ class SemanticUserMemory:
             return int(created.lastrowid)
 
     def forget(self, chat_id: int, sender_id: int, key: str | None = None) -> int:
-        with self._conn() as con:
+        with sqlite_txn(self._conn()) as con:
             rows = con.execute('SELECT id FROM semantic_user_memory WHERE chat_id=? AND sender_id=? AND status="active"' + (' AND key=?' if key is not None else ''), ([chat_id,sender_id,key] if key is not None else [chat_id,sender_id])).fetchall()
             q='UPDATE semantic_user_memory SET status="deleted",last_seen_at=? WHERE chat_id=? AND sender_id=? AND status="active"'; args=[int(time.time()),chat_id,sender_id]
             if key is not None: q += ' AND key=?'; args.append(key)

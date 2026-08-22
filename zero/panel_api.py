@@ -16,6 +16,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .fsprivacy import path_is_private
 from .runtime_control import listener_status
 from .panel_store import DuplicateAdminError, PanelStore
 from .paths import zero_home_path
@@ -278,12 +279,19 @@ class PanelAPI:
         s=self._require(request,csrf=True,write=True); self.sessions={k:v for k,v in self.sessions.items() if v['user_id']!=s['user_id']}; self._audit('LOGOUT_ALL',s); return web.json_response({'ok':True})
 
     async def _dashboard_payload(self):
-        status=listener_status(); provider=self.router.status(); ram='—'
+        status=listener_status(); provider=self.router.status(); ram='—'; cpu='—'
         try:
             info={x.split(':')[0]:x.split(':')[1] for x in Path('/proc/meminfo').read_text().splitlines()}; ram=f'{(1-int(info["MemAvailable"].split()[0])/int(info["MemTotal"].split()[0]))*100:.0f}%'
         except Exception:pass
-        disk=os.statvfs(self.config.memory.db_path); active=self.config.router.normal_primary
-        return {'status':{'listener':status['running'],'cpu':f'{os.getloadavg()[0]:.2f}','ram':ram,'disk':f'{disk.f_bavail/disk.f_blocks*100:.0f}% free'},'provider':{'active':active,'model':provider.get('providers',{}).get(active,{}).get('model','')},'activity':list(self.login_audit)[:5]}
+        try:
+            cpu=f'{os.getloadavg()[0]:.2f}'  # POSIX only; graceful on Windows.
+        except (AttributeError,OSError):pass
+        try:
+            import shutil as _shutil
+            total,_,free=_shutil.disk_usage(self.config.memory.db_path); disk_free=f'{free/total*100:.0f}% free' if total else '—'
+        except OSError:disk_free='—'
+        active=self.config.router.normal_primary
+        return {'status':{'listener':status['running'],'cpu':cpu,'ram':ram,'disk':disk_free},'provider':{'active':active,'model':provider.get('providers',{}).get(active,{}).get('model','')},'activity':list(self.login_audit)[:5]}
     async def _dashboard(self,request):self._require(request); return web.json_response(await self._dashboard_payload())
     async def _realtime(self,request):
         self._require(request); response=web.StreamResponse(headers={'Content-Type':'text/event-stream','Cache-Control':'no-cache','X-Accel-Buffering':'no'}); await response.prepare(request)
@@ -414,7 +422,7 @@ class PanelAPI:
             return {'configured': False, 'permission_valid': False, 'last_rotated': None}
         return {
             'configured': details.st_size > 0,
-            'permission_valid': (details.st_mode & 0o077) == 0,
+            'permission_valid': path_is_private(p),
             'last_rotated': int(details.st_mtime),
         }
     async def _settings(self,request):

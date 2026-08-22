@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import hashlib
 import sqlite3
 import time
@@ -25,7 +26,7 @@ class SchedulerIntelligence:
             "last_failure_reason": "TEXT", "next_retry_at": "INTEGER", "last_attempt_at": "INTEGER",
             "parent_candidate_id": "TEXT", "terminal_reason": "TEXT",
         }
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             existing = {row[1] for row in conn.execute("PRAGMA table_info(proactive_followups)")}
             for name, kind in columns.items():
                 if name not in existing:
@@ -69,7 +70,7 @@ class SchedulerIntelligence:
     def claim_due(self, worker: str, limit: int = 8, now: int | None = None):
         now = int(now if now is not None else time.time()); metrics = defaultdict(int)
         for name in ('scheduler_batch_size','candidate_selected','candidate_claimed','candidate_skipped_fairness','candidate_age_boosted','deadline_expired','deadline_near','retry_scheduled','retry_budget_exhausted','policy_postponed','lease_recovered','candidate_terminal_failed','scheduler_tick_failure'):metrics[name]=0
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             expired = conn.execute(
                 """SELECT id FROM proactive_followups WHERE status IN ('pending','postponed','evaluating','retryable_failed')
@@ -107,7 +108,7 @@ class SchedulerIntelligence:
 
     def policy_postpone(self, candidate_id, requested_at, reason, now=None):
         now=int(now if now is not None else time.time())
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             row=conn.execute("SELECT deadline_at FROM proactive_followups WHERE id=?",(candidate_id,)).fetchone()
             if not row:return False
             deadline=row[0];due=int(requested_at)
@@ -123,7 +124,7 @@ class SchedulerIntelligence:
     def technical_failure(self,candidate_id,reason,now=None):
         allowed={'provider_transient','generation_transient','transport_transient','database_transient','scheduler_item_failure'}
         now=int(now if now is not None else time.time());reason=str(reason) if str(reason) in allowed else 'transport_transient'
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             conn.execute("BEGIN IMMEDIATE");row=conn.execute("SELECT retry_count,max_retries,status FROM proactive_followups WHERE id=?",(candidate_id,)).fetchone()
             if not row or row[2] in TERMINAL:conn.rollback();return None
             count=int(row[0] or 0)+1;budget=max(1,int(row[1] or 3))
@@ -134,7 +135,7 @@ class SchedulerIntelligence:
 
     def cancel(self,candidate_id,reason,now=None,*,status="cancelled"):
         now=int(now if now is not None else time.time());reason=str(reason)[:80]
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             ids=[r[0] for r in conn.execute("WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT p.id FROM proactive_followups p JOIN tree t ON p.parent_candidate_id=t.id) SELECT id FROM tree",(candidate_id,)).fetchall()]
             for item in ids:
                 conn.execute("UPDATE proactive_followups SET status=?,terminal_reason=?,cancel_reason=?,resolved_at=?,lease_until=NULL,worker_id=NULL,next_retry_at=NULL WHERE id=? AND status!='sent'",(status,reason,reason,now,item));self._stop_outbox(conn,item,reason)
@@ -142,13 +143,13 @@ class SchedulerIntelligence:
 
     def cancel_all_active(self, reason='administrative_disable', now=None):
         now=int(now if now is not None else time.time())
-        with self.store._conn() as conn:ids=[r[0] for r in conn.execute("SELECT id FROM proactive_followups WHERE status IN ('pending','postponed','evaluating','retryable_failed')").fetchall()]
+        with sqlite_txn(self.store._conn()) as conn:ids=[r[0] for r in conn.execute("SELECT id FROM proactive_followups WHERE status IN ('pending','postponed','evaluating','retryable_failed')").fetchall()]
         for item in ids:self.cancel(item,reason,now)
         return len(ids)
 
     def propagate_disabled(self,now=None):
         now=int(now if now is not None else time.time())
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             ids=[r[0] for r in conn.execute("""SELECT p.id FROM proactive_followups p JOIN proactive_feedback_preferences f
             ON f.chat_id=p.chat_id AND f.subject_user_id=p.subject_user_id WHERE f.proactive_enabled=0
             AND p.status IN ('pending','postponed','evaluating','retryable_failed')""").fetchall()]

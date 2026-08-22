@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import os
 import time
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ class PolicyEngine:
 
     def __init__(self, store):
         self.store = store
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS proactive_policy_events(
                 id INTEGER PRIMARY KEY, candidate_id TEXT, chat_id INTEGER,
@@ -63,7 +64,7 @@ class PolicyEngine:
         if not all(key in row for key in required) or not str(row.get("topic_summary") or "").strip():
             return PolicyDecision("block", "invalid_candidate")
 
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             has_preferences = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='proactive_feedback_preferences'").fetchone()
             if has_preferences:
                 pref = conn.execute("SELECT proactive_enabled FROM proactive_feedback_preferences WHERE chat_id=? AND subject_user_id=?", (row["chat_id"], row["subject_user_id"])).fetchone()
@@ -82,7 +83,7 @@ class PolicyEngine:
             delta = (start - hour) % 24 or 24
             return PolicyDecision("postpone", "quiet_hours", now + delta * 3600)
 
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             if conn.execute(
                 "SELECT 1 FROM proactive_policy_events WHERE subject_user_id=? AND event='sent' AND created_at>? LIMIT 1",
                 (row["subject_user_id"], now - 72 * 3600),
@@ -111,7 +112,7 @@ class PolicyEngine:
         self._insert(row, event="decision", action=decision.action, reason=decision.reason, now=now)
 
     def _insert(self, row, *, event, action, reason, now) -> None:
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             conn.execute(
                 """INSERT INTO proactive_policy_events(
                 candidate_id,chat_id,subject_user_id,topic,event,action,reason,created_at)

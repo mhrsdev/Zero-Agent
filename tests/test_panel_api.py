@@ -120,7 +120,7 @@ async def test_readiness_bounded_pagination_sse_and_secret_protection(panel):
 
 
 def test_panel_routes_have_no_direct_sql_boundary():
-    source=(ROOT / "zero" / "panel_api.py").read_text()
+    source=(ROOT / "zero" / "panel_api.py").read_text(encoding="utf-8")
     tree=ast.parse(source)
     assert 'sqlite3' not in source
     assert '.execute(' not in source

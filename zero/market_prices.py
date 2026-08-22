@@ -90,9 +90,9 @@ class NavasanPriceClient:
 
     def _api_key(self) -> str:
         try:
-            import os
-            mode = os.stat(self.api_key_path).st_mode & 0o777
-            if mode & 0o077: raise PriceAPIError('کلید Navasan permission امن ندارد.')
+            from .fsprivacy import path_is_private
+            if not path_is_private(self.api_key_path):
+                raise PriceAPIError('کلید Navasan permission امن ندارد.')
             key = open(self.api_key_path, encoding='utf-8').read().strip()
         except PriceAPIError:
             raise

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import json
 import re
 import time
@@ -23,7 +24,7 @@ class OutcomeDetector:
 
     def __init__(self, store, router):
         self.store, self.router = store, router
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS proactive_followup_outcomes(
                 candidate_id TEXT PRIMARY KEY,status TEXT NOT NULL,reason TEXT NOT NULL,
@@ -76,7 +77,7 @@ class OutcomeDetector:
             return self._save(candidate, OutcomeResult("unknown", "classifier_failure", None, 0.0))
 
     def _save(self, candidate, result: OutcomeResult) -> OutcomeResult:
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             conn.execute(
                 """INSERT INTO proactive_followup_outcomes(candidate_id,status,reason,evidence_message_id,confidence,updated_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(candidate_id) DO UPDATE SET status=excluded.status,

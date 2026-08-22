@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import json
 import os
 import random
@@ -326,7 +327,7 @@ async def run_simulation(
         reply_edge_count = int(conn.execute("SELECT count(*) FROM memory_v3_messages WHERE chat_id=? AND reply_to_message_id IS NOT NULL", (CHAT_ID,)).fetchone()[0])
         personal_memory_owner_count = int(conn.execute("SELECT count(DISTINCT owner_user_id) FROM memory_v3_items WHERE chat_id=? AND scope='personal' AND status='active'", (CHAT_ID,)).fetchone()[0])
         memory_integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-    with store._conn() as conn:
+    with sqlite_txn(store._conn()) as conn:
         main_integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
     messages_jsonl_lines = sum(1 for _ in (output / "messages.jsonl").open("r", encoding="utf-8"))

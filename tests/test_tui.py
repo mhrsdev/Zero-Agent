@@ -267,7 +267,7 @@ class TestTUIWiredIntoCLI:
         parser = build_parser()
         args = parser.parse_args(["setup", "--config", "/tmp/zero.json"])
         assert args.command == "setup"
-        assert str(args.config) == "/tmp/zero.json"
+        assert Path(args.config) == Path("/tmp/zero.json")
 
     def test_cli_has_tui_subcommand(self):
         parser = build_parser()

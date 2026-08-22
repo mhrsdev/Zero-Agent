@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import hashlib
 import json
 import logging
@@ -153,7 +154,7 @@ class KnowledgeWorker:
 
     async def schedule_status(self) -> dict[str, Any]:
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute("SELECT job_id,approval_state,state,schedule_json,next_run_at,last_run_at FROM cron_jobs WHERE template_id='nightly_knowledge_refresh.v1' AND state<>'deleted' ORDER BY created_at DESC LIMIT 1").fetchone()
         data = dict(row) if row else {'job_id': None, 'approval_state': 'not_created', 'state': 'disabled', 'schedule_json': json_compact({'kind': 'daily', 'hour': 3, 'minute': 0, 'timezone': 'Asia/Tehran'}), 'next_run_at': None, 'last_run_at': None}
         data['last_run'] = data.pop('last_run_at', None)
@@ -165,7 +166,7 @@ class KnowledgeWorker:
 
     async def ensure_topics(self) -> None:
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 for i, topic in enumerate(TOPICS):
                     conn.execute('INSERT OR IGNORE INTO knowledge_topics(topic,enabled,priority,frequency,last_checked_at,next_check_at) VALUES(?,1,?,?,NULL,?)', (topic, len(TOPICS)-i, 'daily', now()))
                 conn.commit()
@@ -173,7 +174,7 @@ class KnowledgeWorker:
     async def status(self) -> dict[str, Any]:
         await self.ensure_topics()
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 run = conn.execute('SELECT * FROM knowledge_runs ORDER BY started_at DESC LIMIT 1').fetchone()
                 items = conn.execute("SELECT COUNT(*) c FROM knowledge_items WHERE status='active'").fetchone()['c']
                 return {'backend': self.active_backend, 'active_items': items, 'last_run': dict(run) if run else None}
@@ -181,14 +182,14 @@ class KnowledgeWorker:
     async def select_topics(self, limit: int) -> list[dict[str, Any]]:
         await self.ensure_topics()
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 rows = [dict(r) for r in conn.execute("SELECT * FROM knowledge_topics WHERE enabled=1 ORDER BY COALESCE(last_checked_at,0), priority DESC, id LIMIT ?", (limit,)).fetchall()]
         return rows
 
     async def _log(self, run_id: str, event: str, **data: Any) -> None:
         logger.info('%s trace_id=%s run_id=%s %s', event, data.pop('trace_id', '-'), run_id, ' '.join(f'{k}={v}' for k, v in data.items()))
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT INTO knowledge_audit(run_id,event_type,payload_json,created_at) VALUES(?,?,?,?)', (run_id, event, json_compact(data), now())); conn.commit()
 
     async def process_telegram_candidates(self, run_id: str, trace_id: str, budget: int = 1) -> dict[str, int]:
@@ -199,7 +200,7 @@ class KnowledgeWorker:
         await self._log(run_id, 'TG_KNOWLEDGE_BATCH_STARTED', trace_id=trace_id, candidate_count=len(candidates), topic=topic_name)
         sources=[{'title': f"Telegram {c['channel_identifier']}", 'url': c['canonical_link'], 'domain': 't.me', 'published_at': c['published_at'], 'extract': c['text_excerpt'][:800]} for c in candidates]
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT OR IGNORE INTO knowledge_topics(topic,enabled,priority,frequency,last_checked_at,next_check_at) VALUES(?,1,0,\'daily\',NULL,?)',(topic_name,now())); topic=conn.execute('SELECT * FROM knowledge_topics WHERE topic=?',(topic_name,)).fetchone(); conn.commit()
         try:
             payload=await self.backends[self.active_backend].summarize_and_extract(topic_name,sources,KnowledgePolicy())
@@ -220,7 +221,7 @@ class KnowledgeWorker:
         topic_name='Web Search'; await self._log(run_id,'WEB_KNOWLEDGE_BATCH_STARTED',trace_id=trace_id,candidate_count=len(candidates),topic=topic_name)
         sources=[{'title':c['title'],'url':c['url'],'domain':re.sub(r'^https?://([^/]+).*',r'\1',c['url']),'published_at':'','extract':(c['extracted_relevant_text'] or c['snippet'])[:1200]} for c in candidates]
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT OR IGNORE INTO knowledge_topics(topic,enabled,priority,frequency,last_checked_at,next_check_at) VALUES(?,1,0,\'daily\',NULL,?)',(topic_name,now())); topic=conn.execute('SELECT * FROM knowledge_topics WHERE topic=?',(topic_name,)).fetchone(); conn.commit()
         try:
             payload=await self.backends[self.active_backend].summarize_and_extract(topic_name,sources,KnowledgePolicy()); data=validate_model_output(payload,sources,expected_topic=topic_name)
@@ -235,7 +236,7 @@ class KnowledgeWorker:
     async def run_nightly(self, *, dry_run: bool = False, topic_limit: int | None = None) -> dict[str, Any]:
         run_id, trace_id = 'krun_' + uuid.uuid4().hex[:16], uuid.uuid4().hex[:12]
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT INTO knowledge_runs(run_id,started_at,status,trace_id,backend,model_name) VALUES(?,?,?,?,?,?)', (run_id, now(), 'running', trace_id, self.active_backend, self.backends[self.active_backend].model_name)); conn.commit()
         try:
             result = await self._run_nightly_impl(run_id, trace_id, dry_run=dry_run, topic_limit=topic_limit)
@@ -244,13 +245,17 @@ class KnowledgeWorker:
             result = {'run_id': run_id, 'dry_run': dry_run, 'status': 'failed', 'reason': type(exc).__name__, 'topics': 0, 'llm_calls_used': 0, 'accepted_count': 0, 'rejected_count': 1}
             status = 'failed'
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('UPDATE knowledge_runs SET finished_at=?,status=?,reason=?,llm_calls_used=?,accepted_count=?,rejected_count=? WHERE run_id=?', (now(), status, result.get('reason', ''), result.get('llm_calls_used', 0), result.get('accepted_count', 0), result.get('rejected_count', 0), run_id)); conn.commit()
         return result
 
     async def _run_nightly_impl(self, run_id: str, trace_id: str, *, dry_run: bool = False, topic_limit: int | None = None) -> dict[str, Any]:
         started = time.monotonic()
-        if not dry_run and (os.getloadavg()[0] > max(1.0, (os.cpu_count() or 1) * 0.8) or not _memory_available_ok()):
+        try:
+            load_ok = os.getloadavg()[0] <= max(1.0, (os.cpu_count() or 1) * 0.8)
+        except (AttributeError, OSError):  # Windows has no os.getloadavg.
+            load_ok = True
+        if not dry_run and (not load_ok or not _memory_available_ok()):
             return {"run_id": run_id, "status": "SKIPPED_RESOURCE_PRESSURE", "reason": "resource_pressure", "dry_run": False, "topics": 0, "llm_calls_used": 0, "accepted_count": 0, "rejected_count": 0, "simulation": False}
         limit = topic_limit or await self._setting_int('knowledge_nightly_topic_limit')
         llm_limit = await self._setting_int('knowledge_nightly_llm_call_limit')
@@ -304,7 +309,7 @@ class KnowledgeWorker:
         ttl = 72 if data['freshness'] == 'daily' else 336 if data['freshness'] == 'weekly' else 2160
         expiry = 4102444800 if getattr(backend, 'name', '') == 'rss_ingest' else now() + min(ttl, int(data['suggested_ttl_hours'])) * 3600
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 old = conn.execute("SELECT * FROM knowledge_items WHERE semantic_key=? AND status IN ('active','updated') ORDER BY version DESC LIMIT 1", (semantic,)).fetchone()
                 if old and old['content_hash'] == content_hash:
                     conn.execute('UPDATE knowledge_items SET last_seen_at=? WHERE id=?', (now(), old['id']))
@@ -323,7 +328,7 @@ class KnowledgeWorker:
         for fa, aliases in _KNOWLEDGE_ALIASES.items():
             if fa in query: terms.update(aliases)
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 rows = [dict(r) for r in conn.execute("SELECT * FROM knowledge_items WHERE status='active' AND (expires_at>? OR created_by_backend='rss_ingest') AND confidence>=? ORDER BY last_verified_at DESC LIMIT 200", (now(), policy.min_confidence)).fetchall()]
         scored = [(sum(t in (r['title'] + ' ' + r['summary']).lower() for t in terms), r) for r in rows]
         ranked = [r for score, r in sorted(scored, key=lambda x: (x[0], x[1]['importance'], x[1]['confidence']), reverse=True) if score > 0][:policy.max_items]

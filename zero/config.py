@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
-import stat
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .fsprivacy import ensure_private_path
 from .paths import zero_home_path
 
 
@@ -16,12 +16,8 @@ _SECRET_ENV = "ZERO_SECRET_FILE"
 
 
 def _private_file(path: Path, label: str) -> None:
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"{label} not found: {path}") from exc
-    if mode & 0o077:
-        raise PermissionError(f"{label} permissions must not expose group/world bits: {path}")
+    """Reject secret files that other accounts can read (POSIX bits / NTFS ACL)."""
+    ensure_private_path(path, label)
 
 
 def _placeholder(value: Any) -> bool:
@@ -321,9 +317,17 @@ class OfficeConfig(BaseModel):
     def validate_consistency(self) -> "OfficeConfig":
         if self.concurrency.per_user_jobs > self.concurrency.global_jobs:
             raise ValueError("office per-user concurrency exceeds global concurrency")
-        if not Path(self.cli_path).is_absolute():
+
+        def _absolute_on_any_platform(value: str) -> bool:
+            # Accept POSIX-style paths ("/usr/local/...") even when running on
+            # Windows: the Office worker is Linux-targeted and its default
+            # cli_path is a POSIX path. Path(...).is_absolute() alone rejects
+            # it on Windows and makes every ZeroConfig unconstructible.
+            return PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute()
+
+        if not _absolute_on_any_platform(self.cli_path):
             raise ValueError("office cli_path must be absolute")
-        if not Path(self.workspace_root).is_absolute():
+        if not _absolute_on_any_platform(self.workspace_root):
             raise ValueError("office workspace_root must be absolute")
         return self
 

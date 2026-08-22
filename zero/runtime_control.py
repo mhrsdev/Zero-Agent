@@ -6,11 +6,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .fsprivacy import restrict_private_path
 from .paths import repo_path, zero_home_path
 
 PID_DIR = zero_home_path("pids")
 PID_DIR.mkdir(parents=True, exist_ok=True)
-os.chmod(PID_DIR, 0o700)
+try:
+    restrict_private_path(PID_DIR, directory=True)
+except PermissionError:
+    pass
 LISTENER_PID = PID_DIR / "listener.pid"
 _LISTENER_SCRIPT = str(repo_path("scripts", "run_listener.py"))
 _LISTENER_PYTHON = os.environ.get("ZERO_PYTHON") or sys.executable
@@ -44,7 +48,10 @@ def start_listener() -> dict[str, str | int | bool]:
         return status
     proc = subprocess.Popen([_LISTENER_PYTHON, _LISTENER_SCRIPT], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     LISTENER_PID.write_text(str(proc.pid))
-    os.chmod(LISTENER_PID, 0o600)
+    try:
+        restrict_private_path(LISTENER_PID)
+    except PermissionError:
+        pass
     return {'running': True, 'pid': proc.pid}
 
 

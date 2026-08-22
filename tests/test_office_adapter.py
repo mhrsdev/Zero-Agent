@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -88,10 +89,12 @@ def test_adapter_uses_argv_without_shell_and_fixed_workspace_paths(tmp_path, mon
         return FakeProcess()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    adapter = OfficeCliAdapter(config(cli_path="/usr/local/lib/zero-office/officecli"), workspace)
+    cli = tmp_path / "officecli"
+    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    adapter = OfficeCliAdapter(config(cli_path=str(cli)), workspace)
     adapter.run_cli(["validate", str(workspace.output / "safe.docx"), "--json"])
     argv, kwargs = calls[0]
-    assert argv[0] == "/usr/local/lib/zero-office/officecli"
+    assert argv[0] == str(cli)
     assert kwargs.get("shell", False) is False
     assert kwargs["cwd"] == workspace.working
     assert kwargs["env"]["OFFICECLI_SKIP_UPDATE"] == "1"
@@ -100,7 +103,9 @@ def test_adapter_uses_argv_without_shell_and_fixed_workspace_paths(tmp_path, mon
 
 def test_adapter_rejects_any_file_argument_outside_workspace(tmp_path):
     workspace = create_workspace(tmp_path, chat_id=1, job_id="job1")
-    adapter = OfficeCliAdapter(config(), workspace)
+    cli = tmp_path / "officecli"
+    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    adapter = OfficeCliAdapter(config(cli_path=str(cli)), workspace)
     with pytest.raises(AdapterError, match="workspace_escape"):
         adapter.run_cli(["validate", "/etc/passwd", "--json"])
 
@@ -111,6 +116,9 @@ def test_timeout_maps_to_safe_error_and_kills_process_group(tmp_path, monkeypatc
 
     class HungProcess:
         returncode = None
+
+        def kill(self):
+            killed.append((self.pid, "KILL"))
         pid = 456
         def communicate(self, timeout=None):
             if killed:
@@ -119,8 +127,11 @@ def test_timeout_maps_to_safe_error_and_kills_process_group(tmp_path, monkeypatc
             raise subprocess.TimeoutExpired("officecli", timeout)
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: HungProcess())
-    monkeypatch.setattr("os.killpg", lambda pid, sig: killed.append((pid, sig)))
-    adapter = OfficeCliAdapter(config(limits={**OfficeConfig().limits.model_dump(), "max_runtime_seconds": 1}), workspace)
+    if hasattr(os, "killpg"):
+        monkeypatch.setattr("os.killpg", lambda pid, sig: killed.append((pid, sig)))
+    cli = tmp_path / "officecli"
+    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    adapter = OfficeCliAdapter(config(cli_path=str(cli), limits={**OfficeConfig().limits.model_dump(), "max_runtime_seconds": 1}), workspace)
     with pytest.raises(AdapterError, match="officecli_timeout"):
         adapter.run_cli(["--version"])
     assert killed and killed[0][0] == 456

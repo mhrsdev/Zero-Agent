@@ -92,7 +92,10 @@ def test_safe_path_rejects_symlink_escape(tmp_path):
     outside.mkdir()
     root = tmp_path / "job"
     root.mkdir()
-    (root / "link").symlink_to(outside, target_is_directory=True)
+    try:
+        (root / "link").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # Windows without symlink privilege
+        pytest.skip(f"symlink unavailable: {exc}")
     with pytest.raises(WorkspaceError):
         safe_path(root, "link/escape.docx")
 

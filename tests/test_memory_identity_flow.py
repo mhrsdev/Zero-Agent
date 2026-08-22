@@ -1,3 +1,4 @@
+from zero.sqlite_tx import sqlite_txn
 from conftest import CONFIG_EXAMPLE
 import pytest
 
@@ -127,7 +128,7 @@ async def test_bot_message_is_archive_only_and_never_creates_human_memory(tmp_pa
 
     rows = await store.get_recent(-1001, 1)
     assert rows[0]["role"] == "bot"
-    with store._conn() as conn:
+    with sqlite_txn(store._conn()) as conn:
         assert conn.execute("SELECT count(*) FROM medium_term_memory").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM memory_rag_documents").fetchone()[0] == 0
 

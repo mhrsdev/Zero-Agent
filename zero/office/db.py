@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import json
 from pathlib import Path
 import re
@@ -151,8 +153,19 @@ class OfficeRepository:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    @contextmanager
+    def _session_ctx(self):
+        """Transaction scope that also closes the connection (sqlite3 `with` does not)."""
+        conn = self.connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+
     def migrate(self) -> None:
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.executescript(OFFICE_SCHEMA)
             # P0-2: add ownership columns to pre-existing databases.
             job_cols = {r[1] for r in conn.execute("PRAGMA table_info(office_jobs)")}
@@ -206,7 +219,7 @@ class OfficeRepository:
         if extracted_characters > character_limit:
             raise QuotaExceeded("character_limit")
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             duplicate = conn.execute(
                 "SELECT * FROM office_jobs WHERE account_scope=? AND chat_id=? AND message_id=?",
@@ -256,18 +269,18 @@ class OfficeRepository:
             return dict(row)
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             return self._row(conn.execute("SELECT * FROM office_jobs WHERE id=?", (job_id,)).fetchone())
 
     def get_by_message(self, account_scope: str, chat_id: int, message_id: int) -> dict[str, Any] | None:
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             return self._row(conn.execute(
                 "SELECT * FROM office_jobs WHERE account_scope=? AND chat_id=? AND message_id=?",
                 (account_scope, chat_id, message_id),
             ).fetchone())
 
     def events(self, job_id: str) -> list[dict[str, Any]]:
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM office_job_events WHERE job_id=? ORDER BY id", (job_id,))]
 
     def transition(
@@ -277,7 +290,7 @@ class OfficeRepository:
         if to_status not in TRANSITIONS:
             raise StateTransitionError("unknown_status")
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT status FROM office_jobs WHERE id=?", (job_id,)).fetchone()
             if not row:
@@ -307,7 +320,7 @@ class OfficeRepository:
 
     def quota_usage(self, user_id: int, quota_date: str, *, installation_id: str = "", group_id: str = "") -> dict[str, int]:
         empty = {"jobs_reserved": 0, "jobs_committed": 0, "characters_reserved": 0, "characters_committed": 0}
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             if installation_id and group_id:
                 row = conn.execute(
                     "SELECT jobs_reserved,jobs_committed,characters_reserved,characters_committed FROM office_quota_usage WHERE installation_id=? AND group_id=? AND user_id=? AND quota_date=?",
@@ -328,7 +341,7 @@ class OfficeRepository:
 
     def _finish_quota(self, job_id: str, *, commit: bool, reason: str) -> bool:
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT installation_id,group_id,user_id,quota_date,extracted_characters,quota_state,status FROM office_jobs WHERE id=?", (job_id,)).fetchone()
             if not row or row["quota_state"] != "reserved":
@@ -364,7 +377,7 @@ class OfficeRepository:
         self, worker: str, *, lease_seconds: int, global_limit: int, per_user_limit: int, now: int | None = None,
     ) -> dict[str, Any] | None:
         now = int(time.time()) if now is None else int(now)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             active = conn.execute(
                 "SELECT user_id,COUNT(*) AS c FROM office_jobs WHERE status IN ('planning','processing','validating_output','rendering','reviewing','repairing') AND COALESCE(lease_expires_at,0)>? GROUP BY user_id",
@@ -393,7 +406,7 @@ class OfficeRepository:
 
     def claim_for_planning(self, worker: str, *, lease_seconds: int, now: int | None = None) -> dict[str, Any] | None:
         now = int(time.time()) if now is None else int(now)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM office_jobs WHERE status='quota_reserved' ORDER BY created_at,id LIMIT 1").fetchone()
             if row is None:
@@ -416,7 +429,7 @@ class OfficeRepository:
         if not statuses or not statuses <= set(TRANSITIONS):
             return []
         placeholders = ",".join("?" for _ in statuses)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             rows = conn.execute(
                 f"SELECT * FROM office_jobs WHERE status IN ({placeholders}) ORDER BY created_at,id LIMIT ?",
                 (*sorted(statuses), min(1000, max(1, int(limit)))),
@@ -427,7 +440,7 @@ class OfficeRepository:
         if not re.fullmatch(r"office(?:cli)?_[a-z0-9_]+", name):
             raise ValueError("invalid_metric_name")
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute(
                 "INSERT INTO office_metrics(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=value+excluded.value,updated_at=excluded.updated_at",
                 (name, int(value), now),
@@ -437,7 +450,7 @@ class OfficeRepository:
         if not re.fullmatch(r"office(?:cli)?_[a-z0-9_]+", name):
             raise ValueError("invalid_metric_name")
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute(
                 "INSERT INTO office_metrics(name,value,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
                 (name, int(value), now),
@@ -451,7 +464,7 @@ class OfficeRepository:
             "office_job_duration_seconds_sum", "office_job_duration_seconds_count",
             "office_jobs_in_progress", "office_quota_refunds_total", "office_delivery_failures_total",
         }
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             stored = {str(row["name"]): int(row["value"]) for row in conn.execute("SELECT name,value FROM office_metrics")}
             stored["office_jobs_received_total"] = int(conn.execute("SELECT COUNT(*) FROM office_jobs").fetchone()[0])
             stored["office_jobs_completed_total"] = int(conn.execute("SELECT COUNT(*) FROM office_jobs WHERE status='completed'").fetchone()[0])
@@ -461,7 +474,7 @@ class OfficeRepository:
 
     def heartbeat(self, job_id: str, worker: str, *, lease_seconds: int, now: int | None = None) -> bool:
         now = int(time.time()) if now is None else int(now)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             changed = conn.execute(
                 "UPDATE office_jobs SET heartbeat_at=?,lease_expires_at=?,updated_at=? WHERE id=? AND lease_owner=? AND status IN ('planning','processing','validating_output','rendering','reviewing','repairing')",
                 (now, now + lease_seconds, now, job_id, worker),
@@ -471,7 +484,7 @@ class OfficeRepository:
     def recover_expired_leases(self, *, now: int | None = None, max_attempts: int) -> dict[str, int]:
         now = int(time.time()) if now is None else int(now)
         result = {"requeued": 0, "failed": 0}
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT * FROM office_jobs WHERE status IN ('planning','processing','validating_output','rendering','reviewing','repairing') AND COALESCE(lease_expires_at,0)<=?",
@@ -509,12 +522,12 @@ class OfficeRepository:
             return
         values["updated_at"] = int(time.time())
         clause = ",".join(f"{key}=?" for key in values)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute(f"UPDATE office_jobs SET {clause} WHERE id=?", (*values.values(), job_id))
 
     def reserve_delivery(self, job_id: str, worker: str, *, lease_seconds: int, now: int | None = None) -> str | None:
         now = int(time.time()) if now is None else int(now)
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT * FROM office_delivery_outbox WHERE job_id=?", (job_id,)).fetchone()
             if row:
@@ -553,7 +566,7 @@ class OfficeRepository:
     def complete_delivery(self, outbound_key: str, *, status: str, error_code: str = "", telegram_message_id: int | None = None) -> None:
         if status not in {"sent", "retryable_failed", "permanent_failed", "ambiguous", "cancelled"}:
             raise ValueError("invalid_delivery_status")
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute(
                 "UPDATE office_delivery_outbox SET status=?,error_code=?,telegram_message_id=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE outbound_key=?",
                 (status, error_code[:80], telegram_message_id, int(time.time()), outbound_key),
@@ -585,7 +598,7 @@ class OfficeRepository:
 
     def complete_delivery_and_commit_quota(self, outbound_key: str, *, telegram_message_id: int) -> bool:
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT job_id,status FROM office_delivery_outbox WHERE outbound_key=?", (outbound_key,)).fetchone()
             if not row or row["status"] not in {"reserved", "sent"}:
@@ -601,7 +614,7 @@ class OfficeRepository:
 
     def reconcile_sent_delivery_quotas(self) -> int:
         now = int(time.time())
-        with self.connect() as conn:
+        with self._session_ctx() as conn:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 """SELECT o.job_id FROM office_delivery_outbox o JOIN office_jobs j ON j.id=o.job_id

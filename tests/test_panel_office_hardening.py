@@ -98,7 +98,7 @@ class TestNoSecretsInGit:
         for src in (root / "zero").rglob("*.py"):
             if "__pycache__" in str(src):
                 continue
-            content = src.read_text()
+            content = src.read_text(encoding="utf-8")
             for pattern in secret_patterns:
                 matches = re.findall(pattern, content)
                 if matches:

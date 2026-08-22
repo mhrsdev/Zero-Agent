@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import json
 import re
 import time
@@ -16,7 +17,7 @@ class FeedbackService:
 
     def __init__(self, store, router, *, now=None):
         self.store, self.router, self._now = store, router, now or (lambda: int(time.time()))
-        with store._conn() as conn:
+        with sqlite_txn(store._conn()) as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS proactive_followup_feedback(
                 id INTEGER PRIMARY KEY,candidate_id TEXT NOT NULL,message_id INTEGER,
@@ -33,7 +34,7 @@ class FeedbackService:
             )
 
     def is_enabled(self, chat_id: int, user_id: int) -> bool:
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             row = conn.execute(
                 "SELECT proactive_enabled FROM proactive_feedback_preferences WHERE chat_id=? AND subject_user_id=?",
                 (chat_id, user_id),
@@ -41,7 +42,7 @@ class FeedbackService:
         return row is None or bool(row[0])
 
     def adjust_delay(self, chat_id: int, user_id: int, base_hours: int) -> int:
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             row = conn.execute(
                 "SELECT timing_multiplier FROM proactive_feedback_preferences WHERE chat_id=? AND subject_user_id=?",
                 (chat_id, user_id),
@@ -56,7 +57,7 @@ class FeedbackService:
         text = str(message.text or "")
         mid = int(message.message_id or 0)
         key = f"{target['id']}:{mid}"
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             existing = conn.execute(
                 "SELECT feedback_type FROM proactive_followup_feedback WHERE idempotency_key=?", (key,)
             ).fetchone()
@@ -88,7 +89,7 @@ class FeedbackService:
 
     def sweep_ignored(self, *, threshold_hours: int = 72) -> int:
         now = int(self._now()); cutoff = now - threshold_hours * 3600
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             rows = conn.execute(
                 """SELECT p.*,max(e.created_at) sent_at FROM proactive_followups p
                 JOIN proactive_policy_events e ON e.candidate_id=p.id AND e.event='sent'
@@ -103,7 +104,7 @@ class FeedbackService:
         return count
 
     def _target(self, chat_id, user_id):
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             row = conn.execute(
                 """SELECT p.*,max(e.created_at) sent_at FROM proactive_followups p
                 JOIN proactive_policy_events e ON e.candidate_id=p.id AND e.event='sent'
@@ -114,7 +115,7 @@ class FeedbackService:
 
     def _record(self, target, message_id, kind, confidence, source, key) -> bool:
         now = int(self._now())
-        with self.store._conn() as conn:
+        with sqlite_txn(self.store._conn()) as conn:
             cur = conn.execute(
                 """INSERT OR IGNORE INTO proactive_followup_feedback(
                 candidate_id,message_id,feedback_type,confidence,source,idempotency_key,created_at)

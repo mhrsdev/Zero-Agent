@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import hashlib
 import json
 import logging
@@ -91,20 +92,20 @@ class ExperienceMemory:
 
     def _audit(self, event_type, experience_id, previous_status, new_status, actor_id, reason='', trace_id=None):
         if event_type not in AUDIT_EVENTS: raise ValueError('invalid_audit_event')
-        with self._c() as c:
+        with sqlite_txn(self._c()) as c:
             c.execute('INSERT INTO experience_memory_audit(event_type,trace_id,experience_id,previous_status,new_status,actor_id,reason,timestamp) VALUES(?,?,?,?,?,?,?,?)', (event_type, trace_id or uuid.uuid4().hex, experience_id, previous_status or '', new_status or '', actor_id, str(reason)[:500], int(time.time())))
             c.commit()
 
     def candidate(self, topic: str, root_cause: str, fix: str, evidence, source_text: str, confidence: float = .8, *, outcome: str = '', regression_tests=()) -> int:
         if not evidence or not _nonempty(root_cause) or not _nonempty(fix) or not 0 <= confidence <= 1: raise ValueError('evidence_required')
         if not validate_evidence(evidence): raise ValueError('invalid_evidence')
-        with self._c() as c:
+        with sqlite_txn(self._c()) as c:
             cur = c.execute('INSERT INTO experience_memory_candidates(topic,root_cause,fix,evidence_json,source_text_hash,confidence,created_at,regression_test_json) VALUES(?,?,?,?,?,?,?,?)', (topic, root_cause, fix, json.dumps(list(evidence), ensure_ascii=False), hashlib.sha256(source_text.encode()).hexdigest(), confidence, int(time.time()), json.dumps(list(regression_tests), ensure_ascii=False)))
             c.commit(); return cur.lastrowid
 
     def approve(self, candidate_id: int, reviewer_id: int) -> int:
         now = int(time.time())
-        with self._c() as c:
+        with sqlite_txn(self._c()) as c:
             row = c.execute("SELECT * FROM experience_memory_candidates WHERE id=? AND status='pending'", (candidate_id,)).fetchone()
             if not row or row['confidence'] < VERIFY_THRESHOLD: raise ValueError('candidate_not_approvable')
             prior = c.execute('SELECT COALESCE(MAX(version),0) v FROM experience_memory WHERE topic=? AND root_cause=?', (row['topic'], row['root_cause'])).fetchone()['v']
@@ -115,7 +116,7 @@ class ExperienceMemory:
 
     def verify(self, experience_id: int, actor_id: int, *, trace_id: str | None = None) -> dict:
         trace_id = trace_id or uuid.uuid4().hex
-        with self._c() as c: row = c.execute('SELECT * FROM experience_memory WHERE id=?', (experience_id,)).fetchone()
+        with sqlite_txn(self._c()) as c: row = c.execute('SELECT * FROM experience_memory WHERE id=?', (experience_id,)).fetchone()
         previous = row['status'] if row else ''
         self._audit('EXPERIENCE_VERIFICATION_REQUESTED', experience_id, previous, previous, actor_id, '', trace_id)
         if not row: reason = 'invalid_status'
@@ -131,14 +132,14 @@ class ExperienceMemory:
             self._audit('EXPERIENCE_VERIFICATION_REJECTED', experience_id, previous, previous, actor_id, reason, trace_id)
             return {'verified': False, 'reason': reason, 'trace_id': trace_id}
         now = int(time.time())
-        with self._c() as c:
+        with sqlite_txn(self._c()) as c:
             c.execute("UPDATE experience_memory SET status='verified',verified_by=?,verified_at=? WHERE id=?", (actor_id, now, experience_id)); c.commit()
         self._audit('EXPERIENCE_VERIFIED', experience_id, previous, 'verified', actor_id, 'evidence_validated', trace_id)
         return {'verified': True, 'id': experience_id, 'status': 'verified', 'verified_by': actor_id, 'verified_at': now, 'trace_id': trace_id}
 
     def invalidate(self, experience_id: int, actor_id: int, reason: str = '', *, trace_id: str | None = None) -> dict:
         trace_id = trace_id or uuid.uuid4().hex
-        with self._c() as c:
+        with sqlite_txn(self._c()) as c:
             row = c.execute('SELECT status FROM experience_memory WHERE id=?', (experience_id,)).fetchone()
             if not row: return {'invalidated': False, 'reason': 'not_found', 'trace_id': trace_id}
             c.execute("UPDATE experience_memory SET status='invalidated',invalidated_reason=?,last_seen_at=? WHERE id=?", (reason[:500], int(time.time()), experience_id)); c.commit()
@@ -148,7 +149,7 @@ class ExperienceMemory:
     def retrieve(self, query: str, debug: bool = False, limit: int = 3) -> list[dict]:
         if not debug: return []
         q=set(re.findall(r'[a-z0-9_]{3,}|[آ-ی]{3,}', (query or '').casefold()))
-        with self._c() as c: rows=c.execute("SELECT * FROM experience_memory WHERE status IN ('active','verified') ORDER BY last_seen_at DESC,confidence DESC").fetchall()
+        with sqlite_txn(self._c()) as c: rows=c.execute("SELECT * FROM experience_memory WHERE status IN ('active','verified') ORDER BY last_seen_at DESC,confidence DESC").fetchall()
         ranked=[]
         for r in rows:
             hay=' '.join((r['topic'],r['root_cause'],r['fix'],r['outcome'],r['evidence_json'])).casefold(); terms=set(re.findall(r'[a-z0-9_]{3,}|[آ-ی]{3,}',hay)); overlap=len(q & terms)

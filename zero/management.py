@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-import os
-import stat
 from pathlib import Path
 from urllib import parse, request
 
+from .fsprivacy import ensure_private_path
+
 
 def _validate_private_file(path: Path, label: str) -> None:
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"{label} not found: {path}") from exc
-    if mode & 0o077:
-        raise PermissionError(f"{label} permissions must not expose group/world bits: {path}")
+    ensure_private_path(path, label)
 
 
 def load_bot_token(bot_env_file: str) -> str:

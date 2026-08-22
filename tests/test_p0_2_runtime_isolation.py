@@ -23,6 +23,7 @@ Scenarios:
 """
 from __future__ import annotations
 
+from zero.sqlite_tx import sqlite_txn
 import inspect
 import sqlite3
 import textwrap
@@ -177,7 +178,7 @@ class TestProactiveOutboxOwnership:
     def test_proactive_outbox_schema_has_installation_and_group(self, tmp_path):
         store = _ProactiveStore(tmp_path / "proactive.db")
         outbox = ProactiveOutbox(store)
-        with store._conn() as c:
+        with sqlite_txn(store._conn()) as c:
             cols = [row[1] for row in c.execute(
                 "PRAGMA table_info(proactive_followup_outbox)"
             )]
@@ -259,7 +260,7 @@ class TestSourceHasNoForbiddenFallbacks:
         for src_path in sources:
             if not src_path.exists():
                 continue
-            content = src_path.read_text()
+            content = src_path.read_text(encoding="utf-8")
             assert pattern not in content, \
                 f"{src_path.name} contains forbidden fallback: {pattern}"
 

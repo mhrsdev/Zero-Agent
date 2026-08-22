@@ -6,6 +6,7 @@ Only handlers in TEMPLATE_REGISTRY can execute, using validated structured input
 """
 from __future__ import annotations
 
+from .sqlite_tx import sqlite_txn
 import asyncio
 import calendar
 import hashlib
@@ -217,7 +218,7 @@ class TemplateJobService:
         role = await self.role_for(actor)
         now = _now()
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 prior = conn.execute('SELECT event_hash FROM cron_audit ORDER BY id DESC LIMIT 1').fetchone()
                 previous = prior['event_hash'] if prior else '0' * 64
                 payload = _json({'trace_id': trace_id, 'actor': actor, 'role': role, 'action': action, 'object': [obj_type, obj_id], 'details': details, 'previous': previous, 'at': now})
@@ -229,7 +230,7 @@ class TemplateJobService:
         if int(user_id) == int(self.config.owner_user_id):
             return 'owner'
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT role FROM cron_permissions WHERE user_id=?', (user_id,)).fetchone()
                 return str(row['role']) if row else 'normal_user'
 
@@ -238,7 +239,7 @@ class TemplateJobService:
         if role == 'owner': return OWNER_CAPABILITIES
         if role == 'cron_admin': return ADMIN_CAPABILITIES
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT capabilities_json FROM cron_permissions WHERE user_id=?', (user_id,)).fetchone()
                 return frozenset(json.loads(row['capabilities_json'])) if row else frozenset()
 
@@ -253,7 +254,7 @@ class TemplateJobService:
             raise JobSecurityError('Owner از config شناخته می‌شود و قابل تغییر نیست.')
         now = _now(); role = 'cron_admin' if enabled else 'normal_user'
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT INTO cron_permissions(user_id,role,capabilities_json,granted_by,version,created_at,updated_at) VALUES (?,?,?,?,1,?,?) ON CONFLICT(user_id) DO UPDATE SET role=excluded.role,capabilities_json=excluded.capabilities_json,granted_by=excluded.granted_by,version=cron_permissions.version+1,updated_at=excluded.updated_at', (target, role, _json(sorted(ADMIN_CAPABILITIES if enabled else SAFE_CAPABILITIES)), actor, now, now)); conn.commit()
         await self._audit(actor, 'ROLE_GRANTED' if enabled else 'ROLE_REVOKED', 'permission', str(target), {'role': role})
 
@@ -281,14 +282,14 @@ class TemplateJobService:
         simulation = await self.simulate(actor, template_id, inputs, schedule)
         template = TEMPLATE_REGISTRY[template_id]; now = _now(); job_id = 'job_' + uuid.uuid4().hex[:16]
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute('INSERT INTO cron_jobs(job_id,version,template_id,template_version,owner_user_id,created_by_user_id,chat_id,title,input_json,schedule_json,risk_level,approval_state,state,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (job_id,1,template_id,template.version,self.config.owner_user_id,actor,chat_id,title[:120],_json(inputs),_json(schedule),template.risk,'pending','draft',None,now,now)); conn.commit()
         await self._audit(actor, 'JOB_DRAFTED', 'job', job_id, {'template': template_id, 'risk': template.risk})
         return {'job_id': job_id, **simulation}
 
     async def approve(self, actor: int, job_id: str) -> dict[str, Any]:
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT * FROM cron_jobs WHERE job_id=?', (job_id,)).fetchone()
                 if not row: raise JobSecurityError('Job پیدا نشد.')
                 job = dict(row)
@@ -298,7 +299,7 @@ class TemplateJobService:
         if job['risk_level'] == 'low' and int(actor) not in {int(job['created_by_user_id']), int(self.config.owner_user_id)}: raise JobSecurityError('فقط سازنده یا Owner می‌تواند این draft را تأیید کند.')
         schedule = json.loads(job['schedule_json']); nxt = _next_run(schedule)
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute("UPDATE cron_jobs SET approval_state='approved',state='enabled',next_run_at=?,updated_at=?,version=version+1 WHERE job_id=?", (nxt,_now(),job_id)); conn.commit()
         await self._audit(actor, 'JOB_APPROVED', 'job', job_id, {'next_run_at': nxt})
         return await self.status(job_id)
@@ -307,7 +308,7 @@ class TemplateJobService:
         if actor is not None:
             await self.require(actor, 'cron.logs')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT * FROM cron_jobs WHERE job_id=?', (job_id,)).fetchone()
                 if not row: raise JobSecurityError('Job پیدا نشد.')
                 data = dict(row); metric = conn.execute('SELECT * FROM cron_metrics WHERE job_id=?',(job_id,)).fetchone(); data['metrics'] = dict(metric) if metric else {}
@@ -317,7 +318,7 @@ class TemplateJobService:
         if actor is not None:
             await self.require(actor, 'cron.logs')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 return [dict(row) for row in conn.execute('SELECT * FROM cron_jobs ORDER BY created_at DESC').fetchall()]
 
     async def set_state(self, actor: int, job_id: str, state: str) -> None:
@@ -325,7 +326,7 @@ class TemplateJobService:
         if not action: raise JobSecurityError('State نامعتبر.')
         await self.require(actor, 'cron.pause' if state == 'paused' else 'cron.resume')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 row = conn.execute('SELECT job_id FROM cron_jobs WHERE job_id=?',(job_id,)).fetchone()
                 if not row: raise JobSecurityError('Job پیدا نشد.')
                 conn.execute('UPDATE cron_jobs SET state=?,updated_at=?,version=version+1 WHERE job_id=?',(state,_now(),job_id)); conn.commit()
@@ -334,7 +335,7 @@ class TemplateJobService:
     async def delete(self, actor: int, job_id: str) -> None:
         await self.require(actor, 'cron.delete')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 conn.execute("UPDATE cron_jobs SET state='deleted',updated_at=?,version=version+1 WHERE job_id=?",(_now(),job_id)); conn.commit()
         await self._audit(actor, 'JOB_DELETED', 'job', job_id, {})
 
@@ -398,7 +399,7 @@ class TemplateJobService:
             result = f"📰 {TEMPLATE_REGISTRY[template].title}\n{summary}"[:1000]
             if inputs.get('only_new'):
                 async with self.store._lock:
-                    with self.store._conn() as conn:
+                    with sqlite_txn(self.store._conn()) as conn:
                         prior = conn.execute("SELECT result_text FROM cron_runs WHERE job_id=? AND state='succeeded' AND result_text<>'' ORDER BY created_at DESC LIMIT 1", (job['job_id'],)).fetchone()
                 if prior and prior['result_text'] == result:
                     return ''
@@ -409,13 +410,13 @@ class TemplateJobService:
     async def run_due(self, now: int | None = None, deliver=None) -> list[dict[str, Any]]:
         now = _now() if now is None else now; delivered: list[dict[str, Any]] = []
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 due = [dict(r) for r in conn.execute("SELECT * FROM cron_jobs WHERE state='enabled' AND approval_state='approved' AND next_run_at<=?",(now,)).fetchall()]
         for job in due:
             run_id, trace = 'run_' + uuid.uuid4().hex[:16], uuid.uuid4().hex[:12]; started = _now()
             try:
                 async with self.store._lock:
-                    with self.store._conn() as conn:
+                    with sqlite_txn(self.store._conn()) as conn:
                         row = conn.execute('SELECT run_id,state FROM cron_runs WHERE job_id=? AND scheduled_for=? ORDER BY created_at DESC LIMIT 1', (job['job_id'], job['next_run_at'])).fetchone()
                         if row and row['state'] == 'succeeded': continue
                         if row:
@@ -432,7 +433,7 @@ class TemplateJobService:
                             await self.store.github_trending_mark(item['full_name'], rank=item['rank'], fingerprint=item['fingerprint'], source_url=SOURCE_URL)
                 schedule = json.loads(job['schedule_json']); nxt = _next_run(schedule, max(now, job['next_run_at']))
                 async with self.store._lock:
-                    with self.store._conn() as conn:
+                    with sqlite_txn(self.store._conn()) as conn:
                         if schedule.get('kind') == 'once':
                             conn.execute("UPDATE cron_jobs SET state='completed',last_run_at=?,next_run_at=NULL,updated_at=? WHERE job_id=?", (finished,finished,job['job_id']))
                         else:
@@ -446,7 +447,7 @@ class TemplateJobService:
             except Exception as exc:
                 finished = _now()
                 async with self.store._lock:
-                    with self.store._conn() as conn:
+                    with sqlite_txn(self.store._conn()) as conn:
                         conn.execute("UPDATE cron_runs SET state='failed',finished_at=?,exit_code=1,exception_type=? WHERE run_id=?",(finished,type(exc).__name__,run_id)); conn.commit()
                 await self._audit(self.config.owner_user_id, 'JOB_RUN_FAILED', 'run', run_id, {'exception':type(exc).__name__}, trace)
         return delivered
@@ -455,5 +456,5 @@ class TemplateJobService:
         if actor is not None:
             await self.require(actor, 'cron.logs')
         async with self.store._lock:
-            with self.store._conn() as conn:
+            with sqlite_txn(self.store._conn()) as conn:
                 return [dict(r) for r in conn.execute('SELECT * FROM cron_runs WHERE job_id=? ORDER BY created_at DESC LIMIT ?',(job_id,limit)).fetchall()]
