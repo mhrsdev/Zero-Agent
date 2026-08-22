@@ -14,7 +14,7 @@
 ## موارد مشکوک/قدیمی یا نیازمند تصمیم
 
 - چند systemd unit برای listener در `deploy/systemd/zero-listener.service` و `deploy/zero-listener.service` وجود دارد؛ باید در deployment مشخص شود کدام canonical است.
-- `run_panel.py` پیش‌فرض config path را `/etc/zero/zero.yaml` می‌گیرد (`:40`) ولی listener پیش‌فرض `/root/zero/config/zero.yaml` دارد (`run_listener.py:45`). این تفاوت ممکن است deliberate deployment behavior یا drift باشد؛ بدون بررسی نصب واقعی اصلاح نشود.
+- `run_panel.py` پیش‌فرض config path را `/opt/zero/config/panel.yaml` می‌گیرد (`:40`) ولی listener پیش‌فرض `/opt/zero/config/zero.yaml` دارد (`run_listener.py:45`). این تفاوت ممکن است deliberate deployment behavior یا drift باشد؛ بدون بررسی نصب واقعی اصلاح نشود.
 - README از aiohttp web panel، systemd و Office پشتیبانی می‌گوید، اما فهرست serviceهای نصب‌شده و source-control در نبود `.git` قابل اثبات کامل نیست.
 - `zero/storage.py` schema بسیار بزرگ و مرکزی است؛ migration versioning باید پیش از توسعه‌های بعدی به‌صورت مستقل inventory شود، چون در این مرحله رفتار تغییر نکرده است.
 - برخی config fields در مدل‌ها وجود دارند که باید با search call site بررسی شوند؛ صرف وجود field به معنی effective runtime control نیست.

@@ -17,7 +17,7 @@ This directory is the English, source-grounded documentation set for Zero. It wa
 
 ## Audit scope
 
-- Project root: `/root/zero`
+- Project root: `/opt/zero`
 - Python AST inventory: 194 files, 88 modules under `zero/`, 24 scripts, and 82 Python files under `tests/`/support paths; 26,527 parsed file lines.
 - No AST parse errors were found in the inspected files.
 - `.git` is absent from the project root; Git history, branches, ownership, and diffs cannot be verified.

@@ -7,7 +7,7 @@ history.
 
 ## Exact checkpoint
 
-- Repository: `/root/zero`
+- Repository: `/opt/zero`
 - Branch: `open-source/v0.1-transformation`
 - HEAD: `bb8d56d` (`feat: bind listener requests to group tenancy`)
 - Other tag: `checkpoint/v0.1-green-suite` → `74971e9` (first fully green suite)

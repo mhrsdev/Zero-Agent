@@ -132,12 +132,12 @@ def test_systemd_units_drop_privileges_and_isolate_runtime():
         "UMask=0077",
         "NoNewPrivileges=true",
         "ProtectSystem=strict",
-        "ReadWritePaths=/root/zero/runtime",
+        "ReadWritePaths=/opt/zero/runtime",
     }
     for name in ("zero-listener.service", "zero-panel.service"):
         lines = {line.strip() for line in (ROOT / "deploy" / name).read_text(encoding="utf-8").splitlines()}
-        assert required - {"ReadWritePaths=/root/zero/runtime"} <= lines
-        assert any(line.startswith("ReadWritePaths=/root/zero/runtime") for line in lines)
+        assert required - {"ReadWritePaths=/opt/zero/runtime"} <= lines
+        assert any(line.startswith("ReadWritePaths=/opt/zero/runtime") for line in lines)
 
 
 def test_request_logging_keeps_content_out_of_log_fields():

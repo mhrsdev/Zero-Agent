@@ -19,7 +19,7 @@
 ## Canonical commands
 
 ```bash
-cd /root/zero
+cd /opt/zero
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest tests -q -p no:cacheprovider
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pip check
 python3 - <<'PY'

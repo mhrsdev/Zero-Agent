@@ -1,13 +1,13 @@
 # Forensic Reconstruction — 2026-07-25
 
-Evidence was collected from the live checkout at `/root/zero`; handoff files were treated as historical claims.
+Evidence was collected from the live checkout at `/opt/zero`; handoff files were treated as historical claims.
 
 | Requirement | Evidence | Status | Relevant files/commits | Tests | Exact next action |
 |---|---|---|---|---|---|
 | Transformation branch and baseline | `git branch -avv`, `git rev-parse`, `git diff main...HEAD` | COMPLETE | branch `open-source/v0.1-transformation`; HEAD before this slice `55839d6`; baseline `f9588ec` | `git diff --check` | Continue only on transformation branch |
 | Working tree/checkpoint truth | Initial `git status` showed modified `zero/brain.py`, `zero/core/memory_service.py`, and an untracked V3 regression | PARTIAL | current slice files | targeted and full suite after repair | Commit the completed V3 slice and refresh continuation checkpoint |
 | Tracking set | All requested files existed except `RELEASE_CHECKLIST.md` | PARTIAL | root tracking files | N/A | Add release checklist and keep all tracking files synchronized |
-| Production safety | `main` remained at `f9588ec`; worktree list contained only `/root/zero`; active `zero-*` services were observed but not restarted or edited | COMPLETE for this slice | Git refs; systemd inventory only | N/A | Keep all runtime/service actions isolated and unapplied |
+| Production safety | `main` remained at `f9588ec`; worktree list contained only `/opt/zero`; active `zero-*` services were observed but not restarted or edited | COMPLETE for this slice | Git refs; systemd inventory only | N/A | Keep all runtime/service actions isolated and unapplied |
 | Canonical config/setup | Runtime roots validate canonical config; panel setup uses shared service per prior commits, but legacy conversion and all adapters are not proven | PARTIAL | `zero/configuration/`, `zero/runtime_config.py`, `scripts/run_*.py`, commits `b9e75c8..55839d6` | prior 587 baseline | Audit remaining composition roots and legacy conversion |
 | Memory V3 normal prompt path | `ZeroBrain._handle_no_media` and vision path use `MemoryService`/V3; V1 prompt composer is no longer called there | COMPLETE for normal prompt slice | `zero/brain.py`, `zero/core/memory_service.py` | V3-only regression; full suite | Inventory remaining non-prompt V1 writes/maintenance paths |
 | Memory V1 retirement | `v1_memory_runtime_enabled=False`; legacy storage remains for archive/migration and some maintenance code is still present | PARTIAL | `zero/brain.py`, `zero/storage.py` | full suite green | Build direct V1→V3 migration contract with quarantine/resume/verify/rollback |

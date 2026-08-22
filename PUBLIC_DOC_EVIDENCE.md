@@ -32,7 +32,7 @@ HEAD: 1f7f1efcc09d83876f4fe00e572fbd24da0608eb
 - **IMPLEMENTED:** pinned two-stage `Dockerfile`, unprivileged `zero` user, `/data` volume, read-only runtime, health check at `/api/health`, and Compose services `zero-panel` and `zero-listener`.
 - **VERIFIED LOCALLY:** Docker contract/static tests pass; the CI workflow defines image build and clean-container smoke commands.
 - **BLOCKED locally:** Docker, Podman, and Buildah were unavailable, so no local image build or container run was performed.
-- **Configuration concern:** Compose sets `ZERO_CANONICAL_CONFIG=/data/config/zero.json`, while legacy composition roots still load YAML through `ZERO_CONFIG_PATH` and default to `/root/zero/config/zero.yaml`. The Compose file does not itself provision that legacy YAML path.
+- **Configuration concern:** Compose sets `ZERO_CANONICAL_CONFIG=/data/config/zero.json`, while legacy composition roots still load YAML through `ZERO_CONFIG_PATH` and default to `/opt/zero/config/zero.yaml`. The Compose file does not itself provision that legacy YAML path.
 - **LIVE E2E VERIFIED:** no.
 
 ### Telegram Bot/User Session/Hybrid

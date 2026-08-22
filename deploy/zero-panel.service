@@ -6,13 +6,13 @@ After=network-online.target
 Type=simple
 User=zero
 Group=zero
-WorkingDirectory=/root/zero
-Environment=ZERO_CONFIG_PATH=/etc/zero/zero.yaml
-Environment=ZERO_SECRET_FILE=/root/zero/runtime/secrets/zero.secrets.yaml
+WorkingDirectory=/opt/zero
+Environment=ZERO_CONFIG_PATH=/opt/zero/config/panel.yaml
+Environment=ZERO_SECRET_FILE=/opt/zero/runtime/secrets/zero.secrets.yaml
 Environment=ZERO_PANEL_HOST=127.0.0.1
 Environment=ZERO_PANEL_PORT=8787
-Environment=ZERO_PANEL_PUBLIC_BASE_URL=https://panel.nz2.ir
-ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_panel.py
+Environment=ZERO_PANEL_PUBLIC_BASE_URL=https://panel.example.com
+ExecStart=/opt/zero/.venv/bin/python /opt/zero/scripts/run_panel.py
 Restart=always
 RestartSec=5
 UMask=0077
@@ -27,7 +27,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/root/zero/runtime/logs /root/zero/runtime/state /root/zero/runtime/pids
+ReadWritePaths=/opt/zero/runtime/logs /opt/zero/runtime/state /opt/zero/runtime/pids
 
 [Install]
 WantedBy=multi-user.target

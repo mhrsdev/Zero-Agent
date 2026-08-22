@@ -14,7 +14,7 @@ Inspected the tracked repository structure (260 tracked files), current panel so
 - `panel/index.html`, `panel/app.js`, and `panel/styles.css` are a single-page, Persian RTL, glass/cinematic control-center UI. It has no package/build/type-check pipeline and uses direct string-rendered HTML.
 - `zero/config.py` uses YAML + Pydantic and a separate protected secret YAML. The schema is broad but global; group configuration is primarily represented by allowed group IDs/usernames and shared defaults.
 - `zero/storage.py` is the central SQLite persistence boundary. Office repositories also use the configured DB path. There is no central panel-owned migration/version table observed.
-- `deploy/zero-panel.service` binds the panel to loopback and runs as `zero:zero` with strict systemd hardening. It uses `/etc/zero/zero.yaml` and `/root/zero/runtime/secrets/zero.secrets.yaml`.
+- `deploy/zero-panel.service` binds the panel to loopback and runs as `zero:zero` with strict systemd hardening. It uses `/opt/zero/config/panel.yaml` and `/opt/zero/runtime/secrets/zero.secrets.yaml`.
 
 ## Reusable components
 
@@ -34,7 +34,7 @@ Inspected the tracked repository structure (260 tracked files), current panel so
 - Direct settings override mutations: replace with typed configuration commands/repositories and atomic updates.
 - `zero/web.py` local SearXNG/engine fallback: not a public-release path; external API providers only.
 - Telegram Search config/runtime/public visibility: remove from public API, setup, tools, dashboard, docs, and feature flags; retain only an internal disabled compatibility boundary if needed for migration.
-- Static `/root/zero/runtime/logs/requests.log` assumption in `PanelAPI`: derive paths from validated configuration.
+- Static `/opt/zero/runtime/logs/requests.log` assumption in `PanelAPI`: derive paths from validated configuration.
 
 ## Security risks
 

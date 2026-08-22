@@ -13,17 +13,17 @@
 
 ## Panel نصب‌شده و مرجع config
 
-Panel نصب‌شده با `/etc/zero/zero.yaml` و secret file جدا اجرا می‌شود و روی `127.0.0.1:8787` bind می‌کند؛ source entrypoint آن `scripts/run_panel.py` است. Listener و panel هر دو سرویس مستقل‌اند.
+Panel نصب‌شده با `/opt/zero/config/panel.yaml` و secret file جدا اجرا می‌شود و روی `127.0.0.1:8787` bind می‌کند؛ source entrypoint آن `scripts/run_panel.py` است. Listener و panel هر دو سرویس مستقل‌اند.
 
-Panel default config path با listener یکسان نیست: panel از `ZERO_CONFIG_PATH` و default `/etc/zero/zero.yaml` استفاده می‌کند (`scripts/run_panel.py:40`)، اما listener از `/root/zero/config/zero.yaml` (`scripts/run_listener.py:45`). این را هنگام deployment صریح تنظیم کنید.
+Panel default config path با listener یکسان نیست: panel از `ZERO_CONFIG_PATH` و default `/opt/zero/config/panel.yaml` استفاده می‌کند (`scripts/run_panel.py:40`)، اما listener از `/opt/zero/config/zero.yaml` (`scripts/run_listener.py:45`). این را هنگام deployment صریح تنظیم کنید.
 
 ## systemd واقعی
 
 `deploy/systemd/zero-listener.service`:
 
 - User/Group: `zero`
-- WorkingDirectory: `/root/zero`
-- optional EnvironmentFile: `/root/zero/runtime/office.env`
+- WorkingDirectory: `/opt/zero`
+- optional EnvironmentFile: `/opt/zero/runtime/office.env`
 - ExecStart: `.venv/bin/python scripts/run_listener.py`
 - restart always، `NoNewPrivileges`، private tmp/devices، ProtectSystem و ReadWritePaths محدود (`:5-26`).
 
@@ -43,7 +43,7 @@ Panel default config path با listener یکسان نیست: panel از `ZERO_CO
 
 ## Runtime directories
 
-مسیرهای واقعی در config و serviceها hard-coded/explicit هستند: `/root/zero/runtime/logs`، `/root/zero/runtime/state`، `/root/zero/runtime/pids`، `/root/zero/runtime/office_jobs` و `/root/zero/runtime/office_ingest`. داده‌های این مسیرها حساس‌اند و باید خارج از archive/docs بمانند.
+مسیرهای واقعی در config و serviceها hard-coded/explicit هستند: `/opt/zero/runtime/logs`، `/opt/zero/runtime/state`، `/opt/zero/runtime/pids`، `/opt/zero/runtime/office_jobs` و `/opt/zero/runtime/office_ingest`. داده‌های این مسیرها حساس‌اند و باید خارج از archive/docs بمانند.
 
 ## Health و fail-closed
 

@@ -26,7 +26,7 @@ Memory V2 has its own schema-version row. V1→V2 migration is explicit through 
 
 ## Memory V2
 
-`MemoryV2Service` defaults to `/root/zero/runtime/state/zero-memory-v2.db`, independently of `config.memory.db_path` (`memory_v2/service.py:19-25`, `brain.py:239`). Its enable/read/write/shadow/retrieval controls are environment-driven. V2 sessions are structured, bounded, TTL-based, and optimistic-versioned.
+`MemoryV2Service` defaults to `/opt/zero/runtime/state/zero-memory-v2.db`, independently of `config.memory.db_path` (`memory_v2/service.py:19-25`, `brain.py:239`). Its enable/read/write/shadow/retrieval controls are environment-driven. V2 sessions are structured, bounded, TTL-based, and optimistic-versioned.
 
 ## Office persistence
 

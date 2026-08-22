@@ -46,7 +46,7 @@ Office mode is disabled by default. Enabling it additionally requires:
 - **Windows:** the Python commands may be run in a normal Python environment, and `zero setup` / `zero tui` automatically use a portable line console when Python does not provide `_curses`. The repository does not provide a native Windows service definition; use WSL2 for the Linux-oriented listener, panel, paths, and optional systemd workflow. Windows/WSL2 live Telegram operation was not verified in this audit.
 - **macOS:** manual Python execution may be possible, but the repository does not provide a macOS service definition. Docker Desktop is the only container route described by the repository. macOS live Telegram operation was not verified in this audit.
 
-Do not copy the Linux `/root/zero` paths into Windows or macOS configuration. Set `ZERO_CONFIG_PATH`, `ZERO_HOME`, and the file paths in the YAML config to real paths for the host.
+Do not copy the Linux `/opt/zero` paths into Windows or macOS configuration. Set `ZERO_CONFIG_PATH`, `ZERO_HOME`, and the file paths in the YAML config to real paths for the host.
 
 ## Repository clone command
 
@@ -77,7 +77,7 @@ mkdir -p runtime/secrets runtime/state runtime/logs
 chmod 700 runtime runtime/secrets runtime/state runtime/logs
 ```
 
-Set the runtime path explicitly for a non-`/root/zero` checkout:
+Set the runtime path explicitly for a non-`/opt/zero` checkout:
 
 ```bash
 export ZERO_CONFIG_PATH="$PWD/config/zero.yaml"
@@ -92,7 +92,7 @@ This HEAD has two configuration layers:
 
 ### Legacy runtime YAML
 
-`zero.runtime_config.runtime_config_path()` reads `ZERO_CONFIG_PATH`. Its default is `/root/zero/config/zero.yaml`. The listener, panel, Office worker, and database initializer load the legacy `ZeroConfig` from that path.
+`zero.runtime_config.runtime_config_path()` reads `ZERO_CONFIG_PATH`. Its default is `/opt/zero/config/zero.yaml`. The listener, panel, Office worker, and database initializer load the legacy `ZeroConfig` from that path.
 
 The checked-in template is:
 
@@ -450,7 +450,7 @@ Office health check, when using the legacy YAML path:
 ZERO_CONFIG_PATH="$PWD/config/zero.yaml" python scripts/office_health.py
 ```
 
-The Office health script in this HEAD currently contains a hard-coded `/root/zero/config/zero.yaml` load, so run it only after adapting that path or from the deployment layout it expects. Treat a non-zero result as a failed optional feature, not as proof that the core listener is broken.
+The Office health script in this HEAD currently contains a hard-coded `/opt/zero/config/zero.yaml` load, so run it only after adapting that path or from the deployment layout it expects. Treat a non-zero result as a failed optional feature, not as proof that the core listener is broken.
 
 ## Verifying a successful installation
 
@@ -485,7 +485,7 @@ There is no generic upgrade subcommand. For this HEAD:
 - canonical JSON saves create `~/.zero/config/zero.json.bak` by default, and `ConfigStore.rollback()` restores that backup;
 - a deployment rollback should normally restore the verified pre-change database/config backup and restart the affected services.
 
-For Linux units, the repository names include `zero-listener.service`, `zero-panel.service`, and optional `zero-office-worker.service`. Their embedded `/root/zero` paths are deployment-specific and must not be copied unchanged to another host.
+For Linux units, the repository names include `zero-listener.service`, `zero-panel.service`, and optional `zero-office-worker.service`. Their embedded `/opt/zero` paths are deployment-specific and must not be copied unchanged to another host.
 
 ## Troubleshooting common errors
 

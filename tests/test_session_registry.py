@@ -80,10 +80,10 @@ async def test_login_session_uses_adapter_and_persists_only_safe_status(tmp_path
         "login-test",
         adapter=adapter,
         api_id=12345,
-        api_hash="secret-api-hash",
+        api_hash="example-api-hash",
         phone="+980000000000",
         code_provider=lambda: "12345",
-        password_provider=lambda: "secret-password",
+        password_provider=lambda: "example-password",
     )
     assert outcome.status == "authorized"
     record = registry.get("login-test")
@@ -91,6 +91,6 @@ async def test_login_session_uses_adapter_and_persists_only_safe_status(tmp_path
     assert record.user_id == 99
     assert record.username == "verified_user"
     raw = registry.db_path.read_bytes()
-    assert b"secret-api-hash" not in raw
-    assert b"secret-password" not in raw
+    assert b"example-api-hash" not in raw
+    assert b"example-password" not in raw
     assert b"+980000000000" not in raw

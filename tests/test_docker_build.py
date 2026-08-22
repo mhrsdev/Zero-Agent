@@ -100,7 +100,7 @@ def test_dockerfile_copies_application_directories_not_runtime(dockerfile_text):
             f"Dockerfile must COPY {token} ({label})"
         )
     # The dangerous sibling dirs must never leak in.
-    for forbidden in ("runtime/", "/root/zero/runtime", "runtime/secrets", ".git"):
+    for forbidden in ("runtime/", "/opt/zero/runtime", "runtime/secrets", ".git"):
         assert forbidden not in re.sub(
             r"#.*$", "", dockerfile_text
         ), f"Dockerfile must never reference {forbidden!r}"

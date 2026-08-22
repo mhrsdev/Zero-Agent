@@ -11,7 +11,7 @@ Values are intentionally omitted. Findings identify categories and paths only.
   must never enter Git or a Docker build context.
 - `backups/` and `archive/`: prior recovery material must be excluded from
   public artifacts; previous contents are inventoried as metadata only.
-- `/etc/zero/zero.yaml` and effective systemd drop-ins are private deployment
+- `/opt/zero/config/panel.yaml` and effective systemd drop-ins are private deployment
   configuration.
 - `runtime/logs/`: logs may contain identifiers, labels, user-controlled text,
   traces and exception details; they require retention and redaction policy.

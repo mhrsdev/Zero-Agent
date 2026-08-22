@@ -16,7 +16,7 @@ This includes tests and scripts; “pure source size” depends on the project�
 ## Reproduce without changing the repository
 
 ```bash
-cd /root/zero
+cd /opt/zero
 python3 - <<'PY'
 import ast
 from pathlib import Path

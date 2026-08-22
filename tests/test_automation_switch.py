@@ -233,6 +233,11 @@ def test_proactive_consider_blocked_by_kill_switch(tmp_path: Path, monkeypatch):
 
 
 def test_proactive_observe_mode_records_without_sending(tmp_path: Path, monkeypatch):
+    # Pin the allowed-hours window: the default 9-22 window makes these
+    # tests fail whenever they run during quiet hours (22:00-08:59 UTC).
+    monkeypatch.setenv("ZERO_PROACTIVE_ALLOWED_HOUR_START", "0")
+    monkeypatch.setenv("ZERO_PROACTIVE_ALLOWED_HOUR_END", "24")
+
     async def scenario():
         store = ZeroStore(str(tmp_path / "zero.db"))
         router = FakeRouter()
@@ -260,6 +265,10 @@ def test_proactive_observe_mode_records_without_sending(tmp_path: Path, monkeypa
 
 def test_proactive_still_sends_when_switches_off(tmp_path: Path, monkeypatch):
     """Guard against the switches accidentally disabling normal operation."""
+    # Same quiet-hours pin as the observe-mode test above.
+    monkeypatch.setenv("ZERO_PROACTIVE_ALLOWED_HOUR_START", "0")
+    monkeypatch.setenv("ZERO_PROACTIVE_ALLOWED_HOUR_END", "24")
+
     async def scenario():
         store = ZeroStore(str(tmp_path / "zero.db"))
         router = FakeRouter()

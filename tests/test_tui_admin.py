@@ -25,10 +25,10 @@ async def test_tui_admin_session_actions_require_confirmation_and_safe_state(tmp
         "primary",
         adapter=FakeAuthorizedLogin(),
         api_id=123,
-        api_hash="not-persisted",
+        api_hash="example-not-persisted",
         phone="+980000000000",
         code_provider=lambda: "12345",
-        password_provider=lambda: "not-persisted",
+        password_provider=lambda: "example-not-persisted",
     )
     assert outcome.status == "authorized"
     admin.activate_session("primary")

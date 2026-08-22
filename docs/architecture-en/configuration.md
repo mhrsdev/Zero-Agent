@@ -66,4 +66,4 @@ The models still do not set `extra='forbid'`; unknown keys may therefore be sile
 
 ## Deployment path split
 
-The listener hardcodes `/root/zero/config/zero.yaml` (`run_listener.py:45`), while the panel uses `ZERO_CONFIG_PATH` with `/etc/zero/zero.yaml` as its default (`run_panel.py:40`). Deployment must make this split explicit.
+The listener hardcodes `/opt/zero/config/zero.yaml` (`run_listener.py:45`), while the panel uses `ZERO_CONFIG_PATH` with `/opt/zero/config/panel.yaml` as its default (`run_panel.py:40`). Deployment must make this split explicit.

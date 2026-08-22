@@ -186,7 +186,7 @@ async def _login_viewer(panel, *, identity="@ysnrfd3"):
     return {"Cookie": f"zero_session={cookie}", "X-CSRF-Token": body["csrf"]}, body
 
 
-async def _login_local(panel, *, username="owner", password="StrongPassword123"):
+async def _login_local(panel, *, username="owner", password="example-pass"):
     client, api, bot, cfg, panel_store = panel
     panel_store.create_admin(username, password)
     resp = await client.post(
@@ -276,7 +276,7 @@ async def test_local_admin_csrf_protects_change_password(panel):
     r = await client.post(
         "/api/local/auth/change-password",
         headers=bad,
-        json={"current_password": "StrongPassword123", "new_password": "AnotherPassword123"},
+        json={"current_password": "example-pass", "new_password": "example-pass-new"},
     )
     assert r.status == 403
     # And wrong token must also be rejected
@@ -284,7 +284,7 @@ async def test_local_admin_csrf_protects_change_password(panel):
     r = await client.post(
         "/api/local/auth/change-password",
         headers=bad_token,
-        json={"current_password": "StrongPassword123", "new_password": "AnotherPassword123"},
+        json={"current_password": "example-pass", "new_password": "example-pass-new"},
     )
     assert r.status == 403
 

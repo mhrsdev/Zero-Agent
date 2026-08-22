@@ -32,12 +32,10 @@ SKIP_SUFFIXES = {".png", ".jpg", ".gif", ".ico", ".db", ".session", ".zip", ".wh
 # still REPORTED on every run -- it just does not fail the gate. Nothing is
 # silently whitelisted; review this list whenever it changes.
 KNOWN_FIXTURES = {
-    "StrongPassword123",
     "Bearer abcdefghijklmnopqrstuvwxyz",
     "-----BEGIN PRIVATE KEY-----",
     "-----BEGIN RSA PRIVATE KEY-----",
     "example-gemini-key",
-    "test-secret-never-log",
     "password = hunter2",
 }
 

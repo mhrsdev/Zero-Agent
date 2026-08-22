@@ -16,7 +16,7 @@
 ## إعادة الإنتاج دون تغيير المشروع
 
 ```bash
-cd /root/zero
+cd /opt/zero
 python3 - <<'PY'
 import ast
 from pathlib import Path

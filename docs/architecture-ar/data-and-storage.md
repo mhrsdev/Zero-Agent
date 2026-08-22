@@ -24,7 +24,7 @@ Profiles المقيدة تستخدم `(chat_id, sender_id)` (`storage.py:75-89`)
 
 ## Memory V2
 
-القيمة الافتراضية لـ `MemoryV2Service` هي `/root/zero/runtime/state/zero-memory-v2.db` بشكل مستقل عن `config.memory.db_path` (`memory_v2/service.py:19-25` و`brain.py:239`). session state منظّم ومحدود وذو TTL وoptimistic versioning.
+القيمة الافتراضية لـ `MemoryV2Service` هي `/opt/zero/runtime/state/zero-memory-v2.db` بشكل مستقل عن `config.memory.db_path` (`memory_v2/service.py:19-25` و`brain.py:239`). session state منظّم ومحدود وذو TTL وoptimistic versioning.
 
 ## Office persistence
 

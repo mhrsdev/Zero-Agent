@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=/root/zero
+ROOT=/opt/zero
 UNIT=zero-listener.service
 DROPIN=/etc/systemd/system/${UNIT}.d/memory-v2.conf
 mode=${1:---dry-run}

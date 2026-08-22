@@ -13,9 +13,9 @@
 
 ## Panel المثبت وconfig
 
-يعمل panel المثبت باستخدام `/etc/zero/zero.yaml` وملف secrets منفصل، ويربط على `127.0.0.1:8787`. نقطة دخوله هي `scripts/run_panel.py`.
+يعمل panel المثبت باستخدام `/opt/zero/config/panel.yaml` وملف secrets منفصل، ويربط على `127.0.0.1:8787`. نقطة دخوله هي `scripts/run_panel.py`.
 
-لا يستخدم panel وlistener نفس default config path: panel يستخدم `ZERO_CONFIG_PATH`/`/etc/zero/zero.yaml`، بينما listener يستخدم `/root/zero/config/zero.yaml` (`run_panel.py:40` و`run_listener.py:45`).
+لا يستخدم panel وlistener نفس default config path: panel يستخدم `ZERO_CONFIG_PATH`/`/opt/zero/config/panel.yaml`، بينما listener يستخدم `/opt/zero/config/zero.yaml` (`run_panel.py:40` و`run_listener.py:45`).
 
 ## وحدات systemd
 

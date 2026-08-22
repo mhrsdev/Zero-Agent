@@ -55,4 +55,4 @@ YAML
 
 ## اختلاف مسار config
 
-يستخدم listener `/root/zero/config/zero.yaml` (`run_listener.py:45`)، بينما يستخدم panel `ZERO_CONFIG_PATH` و`/etc/zero/zero.yaml` افتراضياً (`run_panel.py:40`). يجب جعل ذلك واضحاً في النشر.
+يستخدم listener `/opt/zero/config/zero.yaml` (`run_listener.py:45`)، بينما يستخدم panel `ZERO_CONFIG_PATH` و`/opt/zero/config/panel.yaml` افتراضياً (`run_panel.py:40`). يجب جعل ذلك واضحاً في النشر.

@@ -6,9 +6,9 @@ After=network-online.target
 Type=simple
 User=zero
 Group=zero
-WorkingDirectory=/root/zero
-EnvironmentFile=-/root/zero/runtime/office.env
-ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_listener.py
+WorkingDirectory=/opt/zero
+EnvironmentFile=-/opt/zero/runtime/office.env
+ExecStart=/opt/zero/.venv/bin/python /opt/zero/scripts/run_listener.py
 Restart=always
 RestartSec=5
 UMask=0077
@@ -23,7 +23,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/root/zero/runtime/logs /root/zero/runtime/state /root/zero/runtime/pids /root/zero/runtime/office_jobs /root/zero/runtime/office_ingest
+ReadWritePaths=/opt/zero/runtime/logs /opt/zero/runtime/state /opt/zero/runtime/pids /opt/zero/runtime/office_jobs /opt/zero/runtime/office_ingest
 
 [Install]
 WantedBy=multi-user.target

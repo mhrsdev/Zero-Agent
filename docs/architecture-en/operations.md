@@ -13,17 +13,17 @@
 
 ## Installed panel and configuration path
 
-The installed panel runs with `/etc/zero/zero.yaml` and a separate secret file, binding to `127.0.0.1:8787`. Its source entrypoint is `scripts/run_panel.py`. Listener and panel are independent services.
+The installed panel runs with `/opt/zero/config/panel.yaml` and a separate secret file, binding to `127.0.0.1:8787`. Its source entrypoint is `scripts/run_panel.py`. Listener and panel are independent services.
 
-The panel and listener do not share the same default config path: panel uses `ZERO_CONFIG_PATH`/`/etc/zero/zero.yaml`, while listener uses `/root/zero/config/zero.yaml` (`run_panel.py:40`, `run_listener.py:45`).
+The panel and listener do not share the same default config path: panel uses `ZERO_CONFIG_PATH`/`/opt/zero/config/panel.yaml`, while listener uses `/opt/zero/config/zero.yaml` (`run_panel.py:40`, `run_listener.py:45`).
 
 ## systemd units
 
 Listener unit:
 
 - `User=zero`, `Group=zero`
-- optional `/root/zero/runtime/office.env`
-- `ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_listener.py`
+- optional `/opt/zero/runtime/office.env`
+- `ExecStart=/opt/zero/.venv/bin/python /opt/zero/scripts/run_listener.py`
 - restart always, `NoNewPrivileges`, private tmp/devices, ProtectSystem and restricted `ReadWritePaths` (`deploy/systemd/zero-listener.service:5-26`).
 
 Office worker unit:
@@ -41,7 +41,7 @@ Other service units exist under `deploy/`, including panel and Telegram source d
 
 ## Runtime state
 
-Explicit paths include `/root/zero/runtime/logs`, `state`, `pids`, `office_jobs`, and `office_ingest`. These contain operational data and must remain outside public documentation/source archives.
+Explicit paths include `/opt/zero/runtime/logs`, `state`, `pids`, `office_jobs`, and `office_ingest`. These contain operational data and must remain outside public documentation/source archives.
 
 ## Health and fail-closed behavior
 

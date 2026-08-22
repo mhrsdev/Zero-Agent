@@ -45,7 +45,7 @@ The systemd cgroup is the authoritative physical resource boundary: `MemoryMax`,
 ## Migration and install
 
 ```bash
-cd /root/zero
+cd /opt/zero
 .venv/bin/python scripts/init_db.py
 install -o root -g root -m 0644 deploy/systemd/zero-office-worker.service /etc/systemd/system/zero-office-worker.service
 install -d -o zero -g zero -m 0700 runtime/office_jobs runtime/office_ingest runtime/state
@@ -65,7 +65,7 @@ install -o root -g zero -m 0600 .env.example runtime/office.env
 systemctl restart zero-listener.service
 systemctl enable --now zero-office-worker.service
 systemctl status --no-pager zero-listener.service zero-office-worker.service
-/root/zero/.venv/bin/python /root/zero/scripts/office_health.py
+/opt/zero/.venv/bin/python /opt/zero/scripts/office_health.py
 ```
 
 Never run the Office worker as root. The systemd unit uses `User=zero`, `PrivateNetwork=true`, read-only system/home protections, a private `/tmp`, and write access only to state/Office workspace paths.
@@ -83,7 +83,7 @@ To process an existing file, put the matching command in its caption or reply di
 ## Health and observability
 
 ```bash
-/root/zero/.venv/bin/python /root/zero/scripts/office_health.py
+/opt/zero/.venv/bin/python /opt/zero/scripts/office_health.py
 journalctl -u zero-office-worker.service -u zero-listener.service --since '30 min ago'
 ```
 
@@ -97,7 +97,7 @@ Only terminal, delivered jobs older than the configured retention may be removed
 
 ```bash
 # fail closed first
-sed -i 's/^ZERO_OFFICE_ENABLED=.*/ZERO_OFFICE_ENABLED=false/' /root/zero/runtime/office.env
+sed -i 's/^ZERO_OFFICE_ENABLED=.*/ZERO_OFFICE_ENABLED=false/' /opt/zero/runtime/office.env
 systemctl stop zero-office-worker.service
 systemctl restart zero-listener.service
 systemctl disable zero-office-worker.service

@@ -131,7 +131,7 @@ def test_production_unit_keeps_hardening_and_external_config():
     unit=(ROOT / "deploy" / "zero-panel.service").read_text()
     assert 'User=zero' in unit and 'Group=zero' in unit
     assert 'ProtectHome=read-only' in unit and 'ProtectSystem=strict' in unit and 'UMask=0077' in unit
-    assert 'ZERO_CONFIG_PATH=/etc/zero/zero.yaml' in unit
+    assert 'ZERO_CONFIG_PATH=/opt/zero/config/panel.yaml' in unit
     assert 'ZERO_PANEL_HOST=127.0.0.1' in unit and 'ZERO_PANEL_PORT=8787' in unit
     assert 'User=root' not in unit and 'chmod 777' not in unit
 

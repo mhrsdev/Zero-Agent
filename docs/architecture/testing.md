@@ -20,7 +20,7 @@
 ## فرمان‌های canonical
 
 ```bash
-cd /root/zero
+cd /opt/zero
 .venv/bin/pytest tests -q
 .venv/bin/pytest tests/test_office_*.py -q
 .venv/bin/python -m compileall -q zero scripts

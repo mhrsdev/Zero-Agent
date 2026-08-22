@@ -16,7 +16,7 @@ AST scan read-only روی `zero/`، `scripts/`، `tests/` و `panel/` انجام
 ## بازتولید بدون تغییر repository
 
 ```bash
-cd /root/zero
+cd /opt/zero
 python3 - <<'PY'
 import ast
 from pathlib import Path

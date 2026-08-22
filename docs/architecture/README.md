@@ -16,7 +16,7 @@
 
 ## وضعیت دامنه بررسی
 
-- Root پروژه: `/root/zero`
+- Root پروژه: `/opt/zero`
 - زبان اصلی: Python؛ در `pyproject.toml`، pytest روی `tests/` تنظیم شده است.
 - بررسی AST انجام‌شده: ۱۹۴ فایل Python، ۸۸ ماژول زیر `zero/`، ۲۴ script و ۸۲ فایل test؛ مجموع ۲۶٬۵۲۷ خط فایل‌های بررسی‌شده، بدون `runtime` و cache.
 - `.git` در root وجود ندارد؛ تاریخچه، branch، diff و ownership بر اساس Git قابل تأیید نیست.

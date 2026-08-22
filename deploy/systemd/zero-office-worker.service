@@ -7,10 +7,10 @@ ConditionPathExists=/usr/local/lib/zero-office/officecli
 Type=simple
 User=zero
 Group=zero
-WorkingDirectory=/root/zero
-EnvironmentFile=-/root/zero/runtime/office.env
-ExecCondition=/root/zero/.venv/bin/python /root/zero/scripts/office_feature_enabled.py
-ExecStart=/root/zero/.venv/bin/python /root/zero/scripts/run_office_worker.py
+WorkingDirectory=/opt/zero
+EnvironmentFile=-/opt/zero/runtime/office.env
+ExecCondition=/opt/zero/.venv/bin/python /opt/zero/scripts/office_feature_enabled.py
+ExecStart=/opt/zero/.venv/bin/python /opt/zero/scripts/run_office_worker.py
 Restart=on-failure
 RestartSec=5
 UMask=0077
@@ -35,7 +35,7 @@ MemorySwapMax=0
 CPUQuota=100%
 TasksMax=256
 RuntimeMaxSec=15min
-ReadWritePaths=/root/zero/runtime/state /root/zero/runtime/office_jobs /root/zero/runtime/office_ingest
+ReadWritePaths=/opt/zero/runtime/state /opt/zero/runtime/office_jobs /opt/zero/runtime/office_ingest
 
 [Install]
 WantedBy=multi-user.target

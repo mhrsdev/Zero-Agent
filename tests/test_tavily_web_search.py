@@ -31,7 +31,7 @@ class RecordingTransport:
 
 @pytest.mark.asyncio
 async def test_tavily_uses_bearer_header_and_parses_bounded_official_api_results():
-    secret = "test-secret-never-log"
+    secret = "example-secret"
     transport = RecordingTransport({
         "results": [
             {
