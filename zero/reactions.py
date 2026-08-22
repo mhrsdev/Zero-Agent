@@ -10,6 +10,7 @@ import random
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
+from .automation import automation_disabled
 from .config import ReactionsConfig, ZeroConfig
 from .models import IncomingMessage
 from .storage import ZeroStore
@@ -262,6 +263,10 @@ class ReactionService:
     async def maybe_react(self, event: Any, message: IncomingMessage) -> ReactionDecision:
         status = await self.status()
         trace = message.trace_id or "-"
+        kill = await automation_disabled(self.store)
+        if kill:
+            logger.info("AUTOMATION_KILLED trace_id=%s component=reaction reason=%s", trace, kill)
+            return _skip("kill_switch")
         message_id = int(getattr(event, "id", 0) or 0)
         explicit_request = explicit_reaction_request(message.text)
         if explicit_request and message.reply_to_message_id:

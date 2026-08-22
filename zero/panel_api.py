@@ -25,6 +25,7 @@ _PAGE_MAX = 100
 _SECRET = re.compile(r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;]+)|\b[A-Za-z0-9_-]{32,}\b")
 _ALLOWED_SETTINGS = {
     'web_enabled','vision_enabled','mode','limit_challenge_enabled',
+    'automation_enabled',
     'reactions_enabled','reaction_chance_percent','reaction_max_per_hour','reaction_cooldown_seconds',
     'social_enabled','knowledge_backend','knowledge_auto_enabled','knowledge_runtime_limit_minutes',
 }

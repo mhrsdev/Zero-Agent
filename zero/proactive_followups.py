@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .sqlite_tx import sqlite_txn
-import asyncio,json,os,re,time,uuid
+import asyncio,json,logging,os,re,time,uuid
+from .automation import automation_disabled, observe_only
 from .proactive_feedback import FeedbackService
 from .proactive_outcome import OutcomeDetector
 from .proactive_policy import PolicyDecision, PolicyEngine
@@ -9,6 +10,7 @@ from .proactive_scheduler import SchedulerIntelligence
 from .proactive_transport import Outbox, TransportResult, select_transport
 TYPES={'task_outcome','event_check_in','celebration','travel_return','exam_or_deadline','repair_or_purchase','health_or_wellbeing','project_progress','promise_or_commitment'}
 SENSITIVE={'health_or_wellbeing'}
+logger=logging.getLogger(__name__)
 class ProactiveFollowups:
  def __init__(self,store,router,transport=None,client=None):
   self.store,self.router=store,router;self._schema();self.feedback=FeedbackService(store,router);self.policy=PolicyEngine(store);self.outcomes=OutcomeDetector(store,router);self.rollout=RolloutController(store);self.rollout_enforced=transport is None;self.transport=transport or select_transport(client);self.outbox=Outbox(store);self.scheduler=SchedulerIntelligence(store,self.outbox);self.production_health=ProactiveProductionHealth(store,self.rollout,self.transport)
@@ -20,6 +22,8 @@ class ProactiveFollowups:
     if name not in cols:c.execute(f"alter table proactive_followups add column {name} {'INTEGER' if name in ('claim_at','lease_until','send_reserved_at','send_lease_until','send_attempt_count') else 'TEXT'}")
  async def consider(self,message):
   if os.getenv('ZERO_PROACTIVE_FOLLOWUP_ENABLED','false').lower()!='true' or os.getenv('ZERO_PROACTIVE_FOLLOWUP_CREATE_ENABLED','false').lower()!='true' or message.sender_is_bot:return {'created':False,'reason':'disabled'}
+  kill=await automation_disabled(self.store)
+  if kill:return {'created':False,'reason':'kill_switch'}
   if not self.feedback.is_enabled(message.chat_id,message.sender_id):return {'created':False,'reason':'user_opt_out'}
   prompt='Return JSON only: {"version":1,"should_schedule":bool,"confidence":0..1,"follow_up_type":"task_outcome|event_check_in|celebration|travel_return|exam_or_deadline|repair_or_purchase|health_or_wellbeing|project_progress|promise_or_commitment","topic":"short","goal":"short","delay_hours":6..2160,"deadline_hours":null|1..2160,"sensitivity":"normal|sensitive","intrusiveness":"low|medium|high"}. Never choose priority, write future message, IDs, SQL, paths, or another chat. Reject vague or intrusive follow-ups. User message: '+(message.text or '')[:900]
   t=time.monotonic();r=await self.router.complete(prompt,max_output_tokens=160);lat=int((time.monotonic()-t)*1000)
@@ -40,7 +44,12 @@ class ProactiveFollowups:
  async def claim_due(self,worker,limit=8):
   return await asyncio.to_thread(self.scheduler.claim_due,worker,limit)
  async def tick(self,worker='listener',limit=8):
-  started=time.monotonic();await asyncio.to_thread(self.outbox.recover);await asyncio.to_thread(self.feedback.sweep_ignored);await asyncio.to_thread(self.rollout.heartbeat)
+  started=time.monotonic()
+  kill=await automation_disabled(self.store)
+  if kill:
+   logger.info("AUTOMATION_KILLED component=proactive reason=%s",kill)
+   return [{'action':'blocked','would_send':False,'id':'','outcome_status':'unknown','reason':f'kill_switch:{kill}'}]
+  await asyncio.to_thread(self.outbox.recover);await asyncio.to_thread(self.feedback.sweep_ignored);await asyncio.to_thread(self.rollout.heartbeat)
   await asyncio.to_thread(self.scheduler.propagate_disabled)
   rows=await self.claim_due(worker,limit);out=[]
   for row in rows:
@@ -72,6 +81,11 @@ class ProactiveFollowups:
      rollout_decision=await asyncio.to_thread(self.rollout.decide,row['chat_id'],row['subject_user_id'])
      if not rollout_decision.allowed and rollout_decision.reason!='send_disabled':
       await asyncio.to_thread(self.scheduler.policy_postpone,row['id'],now+3600,'rollout_gate',now);out.append({'action':'postpone','would_send':False,'id':row['id'],'outcome_status':outcome.status,'reason':rollout_decision.reason});continue
+    if observe_only():
+     # Observe mode: the decision to send was reached; record it and re-check later without executing.
+     await asyncio.to_thread(self.scheduler.policy_postpone,row['id'],now+3600,'observe_only',now)
+     logger.info("PROACTIVE_OBSERVE id=%s chat_id=%s type=%s would_send=True",row['id'],row['chat_id'],row['follow_up_type'])
+     out.append({'action':'observe','would_send':True,'id':row['id'],'outcome_status':outcome.status,'reason':'observe_only'});continue
     key=await asyncio.to_thread(self.outbox.reserve,row['id'],worker,now,installation_id=str(row.get('installation_id','') or 'inst'),group_id=str(row.get('group_id','') or 'group'))
     if not key:
      with sqlite_txn(self.store._conn()) as conn:state=conn.execute("SELECT send_state FROM proactive_followup_outbox WHERE candidate_id=?",(row['id'],)).fetchone()

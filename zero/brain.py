@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 
+from .automation import automation_disabled
 from .config import ZeroConfig
 from .memory_planner import plan_memory, render_experience, render_procedures, render_semantic, render_world
 from .memory_context import compose_memory_context
@@ -667,6 +668,8 @@ class ZeroBrain:
         return int(muted.get(str(sender_id), 0) or 0) > int(time.time())
 
     async def _should_interject(self, message: IncomingMessage, social_decision) -> bool:
+        if await automation_disabled(self.store):
+            return False
         if not self.social_awareness.allows_autonomous_interjection(message, social_decision):
             return False
         if not self.config.persona.allow_random_interject:
