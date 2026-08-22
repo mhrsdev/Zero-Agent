@@ -159,7 +159,26 @@ credentials.
 
 See [`INSTALLATION.md`](INSTALLATION.md) for system requirements, OS boundaries, credentials, Telegram modes, provider configuration, database/migration commands, Docker caveats, health checks, backups, rollback, troubleshooting, and removal.
 
-Quick manual entry point:
+One-line install (idempotent, safe to re-run; bootstraps venv, dependencies,
+config from the example, database schema, then runs a health check):
+
+PowerShell (Windows):
+
+```powershell
+git clone https://github.com/mhrsdev/Zero-Agent.git
+cd Zero-Agent
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+bash (Linux/macOS/WSL):
+
+```bash
+git clone https://github.com/mhrsdev/Zero-Agent.git
+cd Zero-Agent
+bash install.sh
+```
+
+Manual entry point for developers:
 
 ```bash
 git clone https://github.com/mhrsdev/Zero-Agent.git
@@ -186,8 +205,12 @@ proactive follow-up messages — passes through a shared gate in
 | `automation_enabled=false` setting | Same stop, persisted; editable from the panel (`POST /api/settings/automation_enabled`). |
 | `ZERO_PROACTIVE_OBSERVE_ONLY=true` (env) | Observe mode: the proactive pipeline computes and logs each decision (`action=observe`, `would_send=true`) but postpones the candidate instead of sending. |
 
-The kill switch fails open on storage errors: an operator must explicitly turn
-automation off, and a transient DB failure never silently changes behaviour.
+The kill switch fails CLOSED: any invalid or unreadable stop-signal source
+(invalid setting value, storage read error) blocks autonomous actions until the
+signal is readable again. Only an explicit `true` enables automation; an env
+value of `false` is neutral and can never re-enable a stopped setting. The full
+precedence matrix is pinned in
+[`tests/test_automation_precedence.py`](tests/test_automation_precedence.py).
 Decisions are auditable in the logs (`AUTOMATION_KILLED`, `PROACTIVE_OBSERVE`,
 `REACTION_DECISION`, `REACTION_SKIPPED`). See
 [`tests/test_automation_switch.py`](tests/test_automation_switch.py) for the
@@ -234,7 +257,6 @@ Tests with names such as `live_e2e`, `real_integration`, or external-account beh
 - Docker build/run was not locally verified in this audit because no Docker-compatible engine was installed.
 - Office live rendering depends on an external pinned OfficeCLI binary and a compatible browser backend.
 - No live Telegram or paid-provider E2E verification is claimed.
-- The repository currently contains conflicting licensing files; see the License section below.
 
 ## Roadmap
 
@@ -245,12 +267,12 @@ The source and tests point to the following evidence-backed work, without implyi
 - finish and document the supported Telegram transport lifecycle;
 - keep public search exposure explicit and separately gated;
 - complete operational migration/recovery verification with real deployment artifacts;
-- resolve the licensing decision and align `LICENSE`, `PROPRIETARY_LICENSE`, and `NOTICE`.
+- publish the canonical CLA document referenced by [`CLA.md`](CLA.md).
 
 ## Contributing
 
-This repository does not currently contain `CONTRIBUTING.md`. Until contribution terms and licensing are resolved, do not infer that pull requests, forks, redistribution, or derivative works are authorized. For private owner-approved work, keep changes narrow, add focused tests, avoid secrets and runtime data, and run the relevant pytest and static checks before requesting review.
+Contributions are welcome under the process in [`CONTRIBUTING.md`](CONTRIBUTING.md). All contributions require a signed Contributor License Agreement (CLA) before merge; see [`CLA.md`](CLA.md) for the acceptance process. Community behavior is governed by the [Contributor Covenant](CODE_OF_CONDUCT.md).
 
 ## License
 
-The repository contains both an Apache License 2.0 text in [`LICENSE`](LICENSE) and a conflicting all-rights-reserved notice in [`PROPRIETARY_LICENSE`](PROPRIETARY_LICENSE), while [`NOTICE`](NOTICE) also describes Apache licensing. This is unresolved in the current HEAD. This README does not declare the project open source or grant permission to use, copy, modify, deploy, or redistribute it. Obtain a written licensing decision from the copyright holder before publishing or using the project.
+Zero is licensed under the [Apache License 2.0](LICENSE); [`NOTICE`](NOTICE) carries the corresponding attribution. You may use, copy, modify, and distribute the project under that license's terms. Contributing changes back to this repository additionally requires the CLA described above.

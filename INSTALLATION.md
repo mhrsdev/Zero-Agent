@@ -8,6 +8,21 @@ https://github.com/mhrsdev/Zero-Agent.git
 
 Zero is alpha software. The commands below are source-derived, but a successful local install does not prove live Telegram, provider, or production E2E behavior.
 
+## One-line install
+
+Fastest path — one command per platform (idempotent; bootstraps the venv,
+installs locked dependencies, copies the example config to
+`<ZERO_HOME>/config/zero.yaml`, initializes the database schema, then runs
+`scripts/doctor.py`):
+
+- Windows PowerShell: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
+- Linux/macOS/WSL bash: `bash install.sh`
+
+Then edit the generated config (Telegram api_id/api_hash, allowed groups) and
+start with `.venv\Scripts\python.exe scripts\run_listener.py` (Windows) or
+`.venv/bin/python scripts/run_listener.py` (POSIX). The sections below cover
+manual installation and every operational detail.
+
 ## System requirements
 
 - Python 3.11 or newer. The repository CI runs Python 3.11 and 3.12.
