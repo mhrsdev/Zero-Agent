@@ -7,6 +7,7 @@ import random
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -66,10 +67,13 @@ def answer_hash(answers: list[str]) -> str:
 class LimitChallengeService:
     """DB-backed, no-LLM bonus quota game triggered only by a real limit hit."""
 
-    def __init__(self, store: ZeroStore, *, rng: random.Random | None = None, active_timeout_seconds: int = 180):
+    def __init__(self, store: ZeroStore, *, rng: random.Random | None = None,
+                 active_timeout_seconds: int = 180, clock: Callable[[], int] | None = None):
         self.store = store
         self.rng = rng or random.SystemRandom()
         self.active_timeout_seconds = active_timeout_seconds
+        # Injectable wall clock so timeout behaviour is deterministic in tests.
+        self.clock = clock or (lambda: int(time.time()))
         # Deliberately stays zero: static pools are the fallback and the only generator.
         self.llm_generation_calls = 0
 
@@ -129,7 +133,7 @@ class LimitChallengeService:
         else:
             raise ValueError(f'unsupported challenge stage {stage}')
 
-        now = int(time.time())
+        now = self.clock()
         await self.store.create_limit_challenge_active(
             user_id, chat_id, stage=stage, challenge_id=uuid.uuid4().hex,
             question=question, answer=json.dumps(answers, ensure_ascii=False),
@@ -172,7 +176,7 @@ class LimitChallengeService:
             logger.info('LIMIT_BONUS_USED user_id=%s chat_id=%s remaining=%s', user_id, chat_id, updated['bonus_quota'])
             return LimitChallengeResult('bonus_used', '🎁 یک پیام از جایزه‌ات مصرف شد.', bonus_quota=updated['bonus_quota'])
 
-        if await self.store.expire_limit_challenge_active(user_id, chat_id):
+        if await self.store.expire_limit_challenge_active(user_id, chat_id, now=self.clock()):
             logger.info('LIMIT_CHALLENGE_EXPIRED user_id=%s chat_id=%s', user_id, chat_id)
         active = await self.store.get_limit_challenge_active(user_id, chat_id)
         if active:

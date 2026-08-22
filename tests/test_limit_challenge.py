@@ -70,17 +70,31 @@ def test_stage_two_is_hidden_until_stage_one_is_completed(tmp_path: Path):
 
 
 def test_wrong_answers_max_two_attempts_and_timeout(tmp_path: Path):
+    # Deterministic clock: the previous version relied on real elapsed time
+    # staying under the 1s timeout between calls, which made the test flaky
+    # under load (a slow CI runner let the challenge expire mid-scenario).
     async def scenario():
         store = ZeroStore(str(tmp_path / "zero.db"))
-        game = LimitChallengeService(store, rng=random.Random(1), active_timeout_seconds=1)
+        # Start from the real epoch so the store's own real-time expiry
+        # bookkeeping stays consistent with the injected service clock.
+        import time as _time
+        now = [int(_time.time())]
+        game = LimitChallengeService(
+            store, rng=random.Random(1), active_timeout_seconds=30,
+            clock=lambda: now[0],
+        )
         offered = await game.handle_limit_hit(1, 2, "")
+        assert offered.kind == "offered"
         assert (await game.handle_limit_hit(1, 2, "wrong")).kind == "wrong"
         final_wrong = await game.handle_limit_hit(1, 2, "still wrong")
         assert final_wrong.kind == "failed"
         assert (await store.get_limit_challenge_progress(1, 2))["current_stage"] == 1
+
+        # A fresh offer after failure...
         again = await game.handle_limit_hit(1, 2, "")
-        active = await store.get_limit_challenge_active(1, 2)
-        await store.expire_limit_challenge_active(1, 2, now=active["expires_at"] + 1)
+        assert again.kind == "offered" and again.stage == 1
+        # ...expires only when the injected clock passes its deadline.
+        now[0] += 31
         expired = await game.handle_limit_hit(1, 2, "anything")
         assert expired.kind == "offered" and expired.stage == 1
     asyncio.run(scenario())
