@@ -425,7 +425,6 @@ async def main() -> None:
             logger.info('SOCIAL_OPT_OUT_RECORDED user_id=%s chat_id=%s trace_id=%s', incoming.sender_id, incoming.chat_id, trace_id)
 
         await awareness.record_feedback(incoming.chat_id, incoming.sender_id, incoming.text)
-        await reactions.maybe_react(event, incoming)
         existing_reactions = getattr(getattr(event, 'message', None), 'reactions', None)
         if existing_reactions is not None:
             await reactions.read_reactions(trace_id=trace_id, message_id=int(event.id), reactions=existing_reactions)
@@ -482,6 +481,12 @@ async def main() -> None:
             )
             logger.exception('BRAIN_REPLY_FAILED sender=%s error=%s trace=%s', incoming.sender_id, type(exc).__name__, trace_id)
             return
+
+        # Reactions run AFTER the reply decision so the opt-in react+reply mode
+        # sees the real ``reply_pending`` state. A broken reply pipeline also
+        # means no decorative emoji: silence over noise.
+        reply_pending = bool(decision.should_reply and answer and answer.strip() != '__NO_REPLY__')
+        await reactions.maybe_react(event, incoming, reply_pending=reply_pending)
 
         if not decision.should_reply or not answer or answer.strip() == '__NO_REPLY__':
             elapsed = time.time() - t0

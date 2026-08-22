@@ -1,0 +1,66 @@
+{
+  "total_scenarios": 245,
+  "action_type_accuracy": 1.0,
+  "per_category": {
+    "angry_bug": "6/6",
+    "clear_react2": "10/10",
+    "clear_reply2": "10/10",
+    "colloquial_fa": "14/14",
+    "crisis": "8/8",
+    "emoji_only": "6/6",
+    "english": "12/12",
+    "finglish": "10/10",
+    "formal_fa": "12/12",
+    "guards2": "6/6",
+    "image_bare": "2/2",
+    "image_caption_celebrate": "1/1",
+    "image_caption_fun": "1/1",
+    "image_caption_tech": "1/1",
+    "injection": "8/8",
+    "mixed": "8/8",
+    "multi_party": "6/6",
+    "old_reply": "5/5",
+    "other_bot": "4/4",
+    "same_signal_diff_words": "5/5",
+    "sarcasm": "6/6",
+    "short_text": "8/8",
+    "similar_pairs": "8/8",
+    "smalltalk2": "25/25",
+    "tech_serious": "8/8",
+    "typo": "10/10",
+    "wr_disabled": "10/10",
+    "wr_negative_content": "20/20",
+    "wr_positive": "15/15"
+  },
+  "confusion_matrix_expected_to_predicted": {
+    "react": {
+      "react": 65,
+      "reply": 0,
+      "both": 0,
+      "silence": 0
+    },
+    "reply": {
+      "react": 0,
+      "reply": 45,
+      "both": 0,
+      "silence": 0
+    },
+    "both": {
+      "react": 0,
+      "reply": 0,
+      "both": 15,
+      "silence": 0
+    },
+    "silence": {
+      "react": 0,
+      "reply": 0,
+      "both": 0,
+      "silence": 120
+    }
+  },
+  "false_interjections": 0,
+  "wrong_silences": 0,
+  "seed_invariance_unstable_actions": [],
+  "with_reply_emoji_variety": 3,
+  "mismatches": []
+}

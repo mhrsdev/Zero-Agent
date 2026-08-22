@@ -1,0 +1,33 @@
+{
+  "total_scenarios": 107,
+  "action_type_accuracy": 1.0,
+  "false_interjection_rate": 0.0,
+  "wrong_silence_rate": 0.0,
+  "no_action_precision": 1.0,
+  "low_confidence_executions": 0,
+  "per_class": {
+    "react": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 22
+    },
+    "reply": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 19
+    },
+    "both": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "support": 0
+    },
+    "silence": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "support": 66
+    }
+  },
+  "bounded_variety_distinct_emojis": 4,
+  "deterministic_repeat": true,
+  "mismatches": []
+}

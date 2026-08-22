@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
@@ -31,6 +32,19 @@ _CONFLICT_TERMS = (
     "دعوا", "فحش", "توهین", "لعنت", "حرومزاده", "ابله", "احمق", "نفرت",
     "تهدید", "abuse", "fuck", "shit", "idiot",
 )
+# Complaint/sarcasm markers: thanks phrasing next to these reads as blame,
+# not gratitude ("ممنون که هیچkdumتون کمک کردین"). Matched as word PREFIXES
+# because they appear with suffixes ("هیچkdumتون").
+_NEG_CONTEXT_STEMS = ("هیچکدوم", "هیچکی", "هیچکسم")
+_NEG_CONTEXT_TERMS = ("بیخیال", "ولش کن", "افتضاح", "بدترین")
+
+
+def _has_negative_context(text: str) -> bool:
+    if _has_any(text, _NEG_CONTEXT_TERMS):
+        return True
+    return any(token.startswith(stem)
+               for token in _TOKEN_RE.findall(text)
+               for stem in _NEG_CONTEXT_STEMS)
 _SENSITIVE_TERMS = (
     "سیاست", "سیاسی", "انتخابات", "جنگ", "تحریم", "رئیس جمهور", "مذهب",
     "دین", "قومیت", "نژاد", "شیعه", "سنی", "یهودی", "اسرائیل", "فلسطین",
@@ -55,8 +69,9 @@ class ReactionContext:
     owner_id: int
     self_id: int
     enabled: bool
-    chance_percent: int
+    chance_percent: int  # deprecated: no longer gates the react/silence decision
     random_value: float = 0.0
+    allow_with_reply: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,12 +113,92 @@ def parse_reaction_command(parts: list[str]) -> tuple[str, int | None]:
     raise ValueError("Usage: /zero reactions [status|on|off|chance <0-100>|limit <1-10>|cooldown <seconds>|read on|read off|stats]")
 
 
+_JOINERS = {"\u200c"}  # ZWNJ joins parts of one Persian word
+_RUNS_RE = re.compile(r"(.)\1{2,}")  # informal elongation: "گرمممم"
+
+
 def _low(text: str) -> str:
-    return (text or "").casefold()
+    # Strip Arabic tatweel so decorated words ("تبـریک") still match.
+    return (text or "").casefold().replace("\u0640", "")
+
+
+def _text_variants(text: str):
+    """Yield the text plus a de-elongated form ("دمت گرمممم" -> "دمت گرم")."""
+    yield text
+    yield _RUNS_RE.sub(r"\1", text)
+
+
+def _edit_distance_le1(a: str, b: str) -> bool:
+    """True when a and b differ by at most one insert/delete/substitute."""
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = edits = 0
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(a) == len(b):
+            i += 1
+        j += 1
+    return True
+
+
+_TOKEN_RE = re.compile(r"[\w\u200c]+")
+
+
+def _has_positive_fuzzy(text: str, terms: tuple[str, ...]) -> bool:
+    """One-edit fuzzy match for POSITIVE terms only (len>=4).
+
+    Catches single-character typos such as "ممننون" ~ "ممنون". Safety lists
+    never use this: a missed distress term is acceptable, a false hit is not.
+    """
+    for token in _TOKEN_RE.findall(text):
+        if len(token) < 4:
+            continue
+        for term in terms:
+            if len(term) >= 4 and abs(len(term) - len(token)) <= 1 \
+                    and _edit_distance_le1(token, term):
+                return True
+    return False
+
+
+def _has_term(text: str, term: str) -> bool:
+    """Boundary-aware containment: a term must not sit inside a larger word.
+
+    Prevents false hits like "وای" inside "هوای". ZWNJ counts as a joiner,
+    so compound terms such as "خنده‌دار" still match.
+    """
+    start = 0
+    while True:
+        idx = text.find(term, start)
+        if idx < 0:
+            return False
+        end = idx + len(term)
+        prev_ch = text[idx - 1] if idx > 0 else ""
+        next_ch = text[end] if end < len(text) else ""
+        if (not prev_ch or prev_ch in _JOINERS or not prev_ch.isalnum()) and \
+           (not next_ch or next_ch in _JOINERS or not next_ch.isalnum()):
+            return True
+        start = idx + 1
 
 
 def _has_any(text: str, terms: tuple[str, ...]) -> bool:
-    return any(term in text for term in terms)
+    return any(_has_term(variant, term) for variant in _text_variants(text)
+               for term in terms)
+
+
+_JOKE_REQUEST_VERBS = ("بگو", "بده", "بکو", "بگید", "کن", "send", "tell")
+
+
+def _is_joke_request(text: str) -> bool:
+    """A request FOR a joke ("جوک بگو") is not funny content to react to."""
+    return _has_any(text, ("جوک", "joke")) and _has_any(text, _JOKE_REQUEST_VERBS)
 
 
 def _skip(reason: str, *, rate_limited: bool = False) -> ReactionDecision:
@@ -137,8 +232,35 @@ def choose_reaction(message: IncomingMessage, context: ReactionContext) -> str |
     return None
 
 
-def should_react(message: IncomingMessage, context: ReactionContext) -> ReactionDecision:
-    """Make a conservative, deterministic policy decision without network/LLM calls."""
+def choose_with_reply_emoji(message: IncomingMessage, context: ReactionContext) -> str | None:
+    """Emoji for the controlled react+reply mode: short emotional approvals only.
+
+    Never funny/cringe/question/surprise faces -- those next to a reply read as
+    noise or mockery. Bounded variety applies to the emoji choice only; whether
+    to act at all was already decided deterministically by ``should_react``.
+    """
+    text = _low(message.text)
+    r = max(0.0, min(0.9999, float(context.random_value)))
+    if _has_any(text, ("تبریک", "مبارک", "موفق شد", "بردیم", "جشن")):
+        return ('🎉', '🥳', '🙌')[int(r * 3)]
+    if _has_any(text, _APPROVE_TERMS) or _has_any(text, ("دقیقاً", "موافقم", "همینه", "صحیح")):
+        return ('👍', '👏', '🔥')[int(r * 3)]
+    if _has_any(text, ("مرسی", "ممنون", "دوستت دارم", "❤️", "❤")):
+        return ('❤️', '🥰', '🤍')[int(r * 3)]
+    return None
+
+
+def should_react(
+    message: IncomingMessage,
+    context: ReactionContext,
+    *,
+    reply_pending: bool = False,
+) -> ReactionDecision:
+    """Make a conservative, deterministic policy decision without network/LLM calls.
+
+    ``reply_pending`` marks messages the bot is about to answer; it enables the
+    opt-in react+reply mode (short emotional approvals only).
+    """
     if not context.enabled:
         return _skip("disabled")
     if message.sender_id == context.self_id:
@@ -147,16 +269,23 @@ def should_react(message: IncomingMessage, context: ReactionContext) -> Reaction
         return _skip("bot_sender")
     text = _low(message.text)
     if not text.strip():
-        return _skip("ambiguous")
-    if explicit_reaction_request(text):
-        target_text = message.reply_text or message.text
-        target = replace(message, text=target_text, reply_text='')
-        emoji = choose_reaction(target, context)
-        if emoji is None:
-            return _skip("no_contextual_signal")
-        reason = "explicit_reaction_contextual"
-        return ReactionDecision(True, emoji, reason, None, 1.0, False)
-    if _has_any(text, _TECHNICAL_TERMS) and (not _has_any(text, _BUG_TERMS) or _has_any(text, ("traceback", "python", "debug", "code", "api", "server"))):
+        # A bare image with no caption and no reply target carries too little
+        # evidence for a confident, useful reaction: stay silent.
+        if message.media_type == "image" and not (message.media_caption or "").strip() \
+                and not (message.reply_text or "").strip():
+            return _skip("insufficient_media_evidence")
+        # Caption text is real signal: run the normal text pipeline on it.
+        if message.media_type == "image" and (message.media_caption or "").strip():
+            text = _low(message.media_caption)
+        else:
+            return _skip("ambiguous")
+    if _is_joke_request(text):
+        return _skip("content_request")
+    if _has_negative_context(text):
+        return _skip("negative_context")
+    # Any technical/serious topic stays silent: a facepalm on someone's bug
+    # report reads as mockery, and the reply pipeline handles real requests.
+    if _has_any(text, _TECHNICAL_TERMS):
         return _skip("technical_or_serious")
     if _has_any(text, _DISTRESS_TERMS):
         return _skip("distress_or_crisis")
@@ -164,11 +293,38 @@ def should_react(message: IncomingMessage, context: ReactionContext) -> Reaction
         return _skip("conflict_or_abuse")
     if _has_any(text, _SENSITIVE_TERMS):
         return _skip("sensitive_topic")
+    if explicit_reaction_request(text):
+        # Explicit user command outranks the contextual heuristics but never
+        # the safety checks above (no celebratory emoji on a condolence).
+        target_text = message.reply_text or message.text
+        target = replace(message, text=target_text, reply_text='')
+        emoji = choose_reaction(target, context)
+        if emoji is None:
+            return _skip("no_contextual_signal")
+        return ReactionDecision(True, emoji, "explicit_reaction_contextual", None, 1.0, False)
+    addressed = message.reply_to_zero or message.mention_zero
+    if reply_pending and addressed:
+        # Opt-in react+reply mode: short emotional approvals only, never
+        # funny/cringe faces next to a reply. Rate limits and duplicate guards
+        # are enforced by ReactionService exactly as for standalone reactions.
+        if not context.allow_with_reply:
+            return _skip("with_reply_disabled")
+        emoji = choose_with_reply_emoji(message, context)
+        if emoji is None:
+            return _skip("addressed_reply_expected")
+        return ReactionDecision(True, emoji, "with_reply_approval", None, 0.7, False)
+    if addressed:
+        # The bot is being addressed; the reply itself is the action and an
+        # extra emoji would only add noise.
+        return _skip("addressed_reply_expected")
+    if _has_positive_fuzzy(
+        text, _APPROVE_TERMS + ("ممنون", "مرسی", "تبریک", "مبارک"),
+    ) and choose_reaction(message, context) is None:
+        # Typo'd praise with no direct rule hit: acknowledge conservatively.
+        return ReactionDecision(True, "👍", "approval_typo", None, 0.7, False)
     emoji = choose_reaction(message, context)
     if emoji is None:
         return _skip("ambiguous")
-    if context.chance_percent <= 0 or context.random_value >= context.chance_percent / 100:
-        return _skip("chance_not_met")
     reason = "funny" if emoji in {"😂", "🤣"} else "approval" if emoji == "👍" else "cringe_or_surprise"
     return ReactionDecision(True, emoji, reason, None, 0.92, False)
 
@@ -260,7 +416,9 @@ class ReactionService:
             "rate_limited_last_hour": await self.store.count_rate_events(0, "reaction_rate_limited", 3600),
         }
 
-    async def maybe_react(self, event: Any, message: IncomingMessage) -> ReactionDecision:
+    async def maybe_react(
+        self, event: Any, message: IncomingMessage, *, reply_pending: bool = False,
+    ) -> ReactionDecision:
         status = await self.status()
         trace = message.trace_id or "-"
         kill = await automation_disabled(self.store)
@@ -273,12 +431,14 @@ class ReactionService:
             message_id = int(message.reply_to_message_id)
         chat_id = int(getattr(event, "chat_id", message.chat_id) or message.chat_id)
         logger.info("REACTION_ENABLED_CHECK trace_id=%s message_id=%s enabled=%s chance=%s limit=%s read_enabled=%s", trace, message_id, status["enabled"], status["chance_percent"], status["hourly_limit"], status["read_enabled"])
+        allow_with_reply = await self._setting_bool("reactions_with_reply_enabled", False)
         context = ReactionContext(
             owner_id=self.config.owner_user_id,
             self_id=self.self_id,
             enabled=bool(status["enabled"]),
             chance_percent=int(status["chance_percent"]),
             random_value=random.random(),
+            allow_with_reply=allow_with_reply,
         )
         if (self.social_awareness
                 and await self.social_awareness.enabled('social_awareness_enabled', True)
@@ -288,7 +448,7 @@ class ReactionService:
                 skipped = _skip(f'social_{social.reason}')
                 logger.info('SOCIAL_SKIP trace_id=%s reason=%s confidence=%.2f chosen_action=reaction', trace, social.reason, social.confidence)
                 return skipped
-        decision = should_react(message, context)
+        decision = should_react(message, context, reply_pending=reply_pending)
         logger.info("REACTION_DECISION trace_id=%s message_id=%s sender_id=%s should_react=%s emoji=%s reason=%s skipped_reason=%s confidence=%.2f", trace, message_id, message.sender_id, decision.should_react, decision.emoji, decision.reason, decision.skipped_reason, decision.confidence)
         if not decision.should_react:
             logger.info("REACTION_SKIPPED trace_id=%s message_id=%s sender_id=%s skipped_reason=%s rate_limited=false", trace, message_id, message.sender_id, decision.skipped_reason)
