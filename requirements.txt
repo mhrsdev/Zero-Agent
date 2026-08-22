@@ -1,8 +1,11 @@
 telethon==1.44.0
-aiogram==3.13.1
+aiogram==3.30.0
+# Security floor: aiohttp <3.13.4 has known PYSEC advisories; aiogram 3.30
+# allows <3.15 so this only lifts the resolver off vulnerable old releases.
+aiohttp>=3.13.4,<3.15
 PyYAML==6.0.2
 aiosqlite==0.20.0
 pydantic==2.9.2
-python-dotenv==1.0.1
-pytest==8.3.2
-pytest-asyncio==0.24.0
+python-dotenv==1.2.3
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -19,6 +19,19 @@ def config(**updates):
     return OfficeConfig.model_validate(data)
 
 
+def _write_executable_cli(tmp_path) -> Path:
+    """Create a fake officecli fixture.
+
+    The adapter refuses to spawn a non-executable CLI (os.access X_OK),
+    which on POSIX means the fixture must carry the exec bit; Windows
+    ignores it, so setting it unconditionally keeps one code path.
+    """
+    cli = tmp_path / "officecli"
+    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    os.chmod(cli, 0o755)
+    return cli
+
+
 def test_structured_plan_accepts_only_whitelisted_operations():
     plan = OfficePlan.model_validate({
         "version": 1,
@@ -89,8 +102,7 @@ def test_adapter_uses_argv_without_shell_and_fixed_workspace_paths(tmp_path, mon
         return FakeProcess()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    cli = tmp_path / "officecli"
-    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    cli = _write_executable_cli(tmp_path)
     adapter = OfficeCliAdapter(config(cli_path=str(cli)), workspace)
     adapter.run_cli(["validate", str(workspace.output / "safe.docx"), "--json"])
     argv, kwargs = calls[0]
@@ -129,8 +141,7 @@ def test_timeout_maps_to_safe_error_and_kills_process_group(tmp_path, monkeypatc
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: HungProcess())
     if hasattr(os, "killpg"):
         monkeypatch.setattr("os.killpg", lambda pid, sig: killed.append((pid, sig)))
-    cli = tmp_path / "officecli"
-    cli.write_text("#!/bin/sh" + chr(10), encoding="utf-8")
+    cli = _write_executable_cli(tmp_path)
     adapter = OfficeCliAdapter(config(cli_path=str(cli), limits={**OfficeConfig().limits.model_dump(), "max_runtime_seconds": 1}), workspace)
     with pytest.raises(AdapterError, match="officecli_timeout"):
         adapter.run_cli(["--version"])
@@ -147,7 +158,10 @@ def test_nonzero_or_malformed_json_output_is_mapped_without_exposing_stderr(tmp_
             return ("not json", "secret /root/path token=abc")
 
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: BadProcess())
-    adapter = OfficeCliAdapter(config(), workspace)
+    # Point at a real executable fixture so run_cli actually reaches the
+    # subprocess layer instead of failing earlier with officecli_unavailable.
+    cli = _write_executable_cli(tmp_path)
+    adapter = OfficeCliAdapter(config(cli_path=str(cli)), workspace)
     with pytest.raises(AdapterError) as error:
         adapter.run_cli(["--version"], expect_json=True)
     assert "/root/path" not in str(error.value)
