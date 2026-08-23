@@ -1247,9 +1247,24 @@ def run_console_tui(
         write(f"Unknown command: {command or '(empty)'}. Type help for commands.")
 
 
+def _ensure_encodable_output() -> None:
+    """Legacy Windows consoles default to codepages like cp1252 that cannot
+    encode the box-drawing characters used by panel rendering. Degrade
+    unencodable glyphs instead of crashing with UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     """TUI entry point. Uses `zero tui` subcommand."""
     args = build_parser().parse_args(argv)
+    _ensure_encodable_output()
 
     if args.print:
         if args.panel == "logs":

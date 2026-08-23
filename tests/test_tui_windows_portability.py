@@ -17,6 +17,24 @@ class _TTY(io.StringIO):
         return True
 
 
+def test_tui_print_survives_legacy_console_encoding(monkeypatch, tmp_path):
+    """`zero tui --print` must not crash on codepages like cp1252 that cannot
+    encode box-drawing glyphs (GitHub Windows runners and legacy cmd.exe)."""
+    from zero import tui
+
+    monkeypatch.setenv("ZERO_HOME", str(tmp_path / "home"))
+    legacy = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    original = sys.stdout
+    sys.stdout = legacy
+    try:
+        rc = tui.main(["--print", "--panel", "sessions"])
+        legacy.flush()
+    finally:
+        sys.stdout = original
+    assert rc == 0
+    assert "?" in legacy.buffer.getvalue().decode("cp1252")
+
+
 def test_interactive_tui_uses_a_console_loop_when_curses_is_unavailable(monkeypatch):
     """A Windows `zero tui` must not render once and immediately terminate."""
     from zero import tui
