@@ -10,6 +10,14 @@ from urllib.parse import urlsplit
 from .models import SearchResult
 
 
+_MIN_EVIDENCE_CHARS = 80
+
+
+def has_usable_evidence(text: str) -> bool:
+    """Avoid giving an LLM a title/challenge shell and calling it page evidence."""
+    return len(re.sub(r'\s+', '', text or '')) >= _MIN_EVIDENCE_CHARS
+
+
 class WebExtractor:
     def __init__(self, transport, max_extract_chars: int = 1200, request_timeout: float = 8.0, max_bytes: int = 1_000_000):
         self.transport = transport

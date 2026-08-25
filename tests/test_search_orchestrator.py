@@ -122,15 +122,15 @@ async def test_orchestrator_uses_duckduckgo_only_after_every_earlier_tier_failed
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_retries_six_times_when_all_search_tiers_are_empty():
+async def test_orchestrator_attempts_primary_and_fallback_once_when_both_empty():
     calls = []
     local = EmptyLocal()
     orchestrator = SearchOrchestrator(FakePrimary(calls, succeeds=False), local)
     outcome = await orchestrator.run('موضوع تست', trace_id='retry-test')
     assert outcome.all_providers_failed is True
-    assert calls == ['google-grounding'] * 6
-    assert local.calls == 6
-    assert local.invalidations == 5
+    assert calls == ['google-grounding']
+    assert local.calls == 1
+    assert local.invalidations == 0
 
 
 @pytest.mark.asyncio

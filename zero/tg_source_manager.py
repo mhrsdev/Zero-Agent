@@ -8,8 +8,6 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import urlopen
 
 from .fsprivacy import restrict_private_path
 from .world_model import WorldModel
@@ -92,17 +90,6 @@ class TelegramSourceManager:
         for category, query in CATEGORIES.items():
             outcome = await web.run(query, trace_id="tg-source-discovery")
             results = [asdict(x) for x in outcome.results[:per_category]]
-            if not results:
-                # Bounded local SearXNG fallback; discovery only, never page analysis.
-                base = getattr(getattr(web, "config", None), "web", None)
-                endpoint = getattr(base, "searxng_base_url", "") or "http://127.0.0.1:8888"
-                try:
-                    url = endpoint.rstrip("/") + "/search?" + urlencode({"q": query, "format": "json"})
-                    with urlopen(url, timeout=12) as response:
-                        payload = json.loads(response.read().decode("utf-8"))
-                    results = payload.get("results", [])[:per_category]
-                except Exception:
-                    results = []
             discovered.extend(extract_candidates(results, category))
         rows = merge_manifest(rows, discovered)
         self.save_manifest(rows)

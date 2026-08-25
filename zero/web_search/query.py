@@ -46,7 +46,7 @@ class QueryRewriter:
         recent_messages = recent_messages or []
         reply_url = self._reply_url(reply_text)
         current_url = self._reply_url(original)
-        target_url = reply_url or current_url
+        target_url = current_url or reply_url
         if not target_url and re.search(r'(?:قیمتش|مشخصاتش|اطلاعاتش|این|اون|همین|چنده\??)', clean):
             for row in reversed(recent_messages[-12:]):
                 recent_url = self._reply_url(str(row.get('text', '') or ''))
@@ -113,7 +113,7 @@ class QueryRewriter:
 
     @staticmethod
     def _reply_url(text: str) -> str:
-        match = _URL_RE.search(text or '')
+        match = _URL_RE.search((text or '').replace('\u200b', '').replace('\u200e', '').replace('\u200f', ''))
         return match.group(0).rstrip('.,،؛؟!') if match else ''
 
     def is_domain_only_followup(self, text: str) -> bool:

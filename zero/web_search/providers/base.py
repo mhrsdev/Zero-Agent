@@ -18,6 +18,10 @@ class SearchProvider(ABC):
     async def search(self, request) -> list[SearchResult]:
         raise NotImplementedError
 
+    async def fetch_url(self, url: str, *, query: str, max_chars: int) -> SearchResult | None:
+        """Return readable evidence for a public URL, or ``None`` when unsupported."""
+        return None
+
 
 class ProviderRegistry:
     def __init__(self):
@@ -40,3 +44,11 @@ class ProviderRegistry:
 
     def names(self, kind: SearchKind = SearchKind.WEB) -> list[str]:
         return [provider.name for group in self.priority_groups(kind) for provider in group]
+
+    def fetch_providers(self, kind: SearchKind = SearchKind.WEB) -> list[SearchProvider]:
+        return [
+            provider
+            for group in self.priority_groups(kind)
+            for provider in group
+            if type(provider).fetch_url is not SearchProvider.fetch_url
+        ]

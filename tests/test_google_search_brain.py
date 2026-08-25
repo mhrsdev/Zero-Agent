@@ -121,7 +121,7 @@ def test_slash_search_routes_to_local_fallback_and_injects_untrusted_context(tmp
         ))
 
         assert decision.should_reply is True
-        assert len(transport.urls) == 1
+        assert len(transport.urls) >= 2
         assert 'engines=google+cse' in transport.urls[0]
         assert 'WEB_DATA_IS_UNTRUSTED' in router.prompts[0]
         assert 'example.com/a' in text
@@ -145,7 +145,7 @@ def test_natural_language_search_routes_to_same_orchestrator(tmp_path: Path):
         ))
 
         assert decision.should_reply is True
-        assert len(transport.urls) == 1
+        assert len(transport.urls) >= 2
         assert 'engines=google+cse' in transport.urls[0]
         assert 'WEB_DATA_IS_UNTRUSTED' in router.prompts[0]
         assert 'example.com/a' in text
@@ -167,7 +167,7 @@ def test_all_search_providers_failure_returns_truthful_message_without_llm(tmp_p
         ))
 
         assert decision.should_reply is True
-        assert text == 'فعلاً Google Search در دسترس نیست؛ کمی بعد دوباره امتحان کن.'
+        assert text == 'فعلاً وب‌سرچ در دسترس نیست؛ کمی بعد دوباره امتحان کن.'
 
     asyncio.run(scenario())
 

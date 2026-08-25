@@ -53,7 +53,7 @@ _SETUP_STEP_KEYS: dict[str, frozenset[str]] = {
 }
 _PROFILE_CHOICES = frozenset({"personal", "single_group", "multi_group", "advanced"})
 _PROVIDER_CHOICES = frozenset({"openrouter", "gemini", "custom"})
-_WEB_SEARCH_PROVIDERS = frozenset({"disabled", "tavily", "brave"})
+_WEB_SEARCH_PROVIDERS = frozenset({"disabled", "tavily", "brave", "wigolo"})
 
 
 class DuplicateAdminError(ValueError):

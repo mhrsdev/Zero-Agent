@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from .cache import TTLCache
 from .context import WebContextBuilder
 from .dedup import deduplicate_results
+from .extraction import _safe_public_url, has_usable_evidence
 from .intent import SearchIntentDetector
 from .models import ProviderFailure, SearchIntent, SearchKind, SearchOutcome, SearchResult
 from .query import QueryRewriter
@@ -54,6 +55,10 @@ class SearchPipeline:
         self.truth_guard = truth_guard or TruthfulnessGuard()
         self.state = state or SearchConversationState()
 
+    def targets_url(self, text: str, *, reply_text: str = '', recent_messages: list[dict] | None = None) -> bool:
+        plan = self.query_rewriter.rewrite(text, reply_text=reply_text, recent_messages=recent_messages)
+        return _is_http_url(plan.query)
+
     async def run(
         self,
         text: str,
@@ -70,7 +75,11 @@ class SearchPipeline:
         force_search: bool = False,
         deep: bool = False,
     ) -> SearchOutcome:
-        intent = self.intent_detector.detect(text)
+        try:
+            intent = self.intent_detector.detect(text, reply_text=reply_text)
+        except TypeError:
+            # Compatibility for narrowly scoped test/custom detectors predating reply URLs.
+            intent = self.intent_detector.detect(text)
         if force_search and (text.strip() or reply_text.strip()):
             intent = SearchIntent(True, SearchKind.WEB, True, 'explicit_web_search')
         logger.info('WEB_INTENT trace_id=%s needed=%s kind=%s supported=%s category=%s', trace_id, intent.needed, intent.kind.value, intent.supported, intent.category)
@@ -96,11 +105,6 @@ class SearchPipeline:
         outcome = SearchOutcome(intent=intent, plan=plan)
         if not intent.needed:
             return outcome
-        if domain_followup and chat_id is not None and sender_id is not None and state_entry is None:
-            outcome.clarification_required = True
-            outcome.context = 'WEB_STATUS: CLARIFICATION_REQUIRED (missing scoped search subject)'
-            logger.info('WEB_FOLLOWUP_CLARIFICATION_REQUIRED trace_id=%s chat_id=%s sender_id=%s domain=%s', trace_id, chat_id, sender_id, plan.preferred_domain or '-')
-            return outcome
         if not intent.supported:
             outcome.context = f'WEB_STATUS: UNSUPPORTED_KIND ({intent.kind.value})'
             return outcome
@@ -108,6 +112,17 @@ class SearchPipeline:
             outcome.clarification_required = True
             outcome.context = 'WEB_STATUS: CLARIFICATION_REQUIRED (empty query)'
             logger.info('WEB_SEARCH_CLARIFICATION_REQUIRED trace_id=%s reason=empty_query', trace_id)
+            return outcome
+        if _is_http_url(plan.query):
+            return await self._inspect_url(
+                SearchIntent(True, SearchKind.WEB, True, 'url_inspection'),
+                plan,
+                trace_id,
+            )
+        if domain_followup and chat_id is not None and sender_id is not None and state_entry is None:
+            outcome.clarification_required = True
+            outcome.context = 'WEB_STATUS: CLARIFICATION_REQUIRED (missing scoped search subject)'
+            logger.info('WEB_FOLLOWUP_CLARIFICATION_REQUIRED trace_id=%s chat_id=%s sender_id=%s domain=%s', trace_id, chat_id, sender_id, plan.preferred_domain or '-')
             return outcome
         if chat_id is not None and sender_id is not None:
             subject = re.sub(r'\s+site:\S+', '', plan.query, flags=re.I).strip()
@@ -199,6 +214,90 @@ class SearchPipeline:
         self.cache.set(cache_key, outcome)
         return outcome
 
+    async def _inspect_url(self, intent: SearchIntent, plan, trace_id: str) -> SearchOutcome:
+        outcome = SearchOutcome(intent=intent, plan=plan)
+        if not _safe_public_url(plan.query):
+            outcome.all_providers_failed = True
+            outcome.context = 'WEB_STATUS: URL_REJECTED'
+            logger.info('WEB_URL_REJECTED trace_id=%s', trace_id)
+            return outcome
+
+        readable = False
+        if self.extractor is not None:
+            try:
+                direct = await self.extractor.extract_url(plan.query, plan.original)
+                readable = True
+                if self._usable_url_result(direct):
+                    return self._url_outcome(intent, plan, direct, trace_id)
+            except Exception as exc:
+                outcome.failures.append(ProviderFailure('direct-url', type(exc).__name__))
+                logger.info('WEB_URL_DIRECT_FETCH_FAILED trace_id=%s exception_type=%s', trace_id, type(exc).__name__)
+
+        for provider in self.registry.fetch_providers(intent.kind):
+            result, failure, succeeded = await self._call_fetch_provider(provider, plan, trace_id)
+            readable = readable or succeeded
+            if failure:
+                outcome.failures.append(failure)
+            if result is not None and self._usable_url_result(result):
+                return self._url_outcome(intent, plan, result, trace_id)
+
+        outcome.all_providers_failed = not readable
+        outcome.no_results = readable
+        outcome.context = 'WEB_STATUS: URL_UNREADABLE'
+        logger.info(
+            'WEB_URL_UNREADABLE trace_id=%s all_providers_failed=%s fetch_provider_count=%d',
+            trace_id,
+            outcome.all_providers_failed,
+            len(self.registry.fetch_providers(intent.kind)),
+        )
+        return outcome
+
+    def _url_outcome(self, intent: SearchIntent, plan, result: SearchResult, trace_id: str) -> SearchOutcome:
+        outcome = SearchOutcome(intent=intent, plan=plan, results=[result])
+        outcome.context = self.context_builder.build(plan, outcome.results)
+        logger.info(
+            'WEB_URL_INSPECTION_OK trace_id=%s provider=%s extract_chars=%d',
+            trace_id,
+            result.provider,
+            len(result.relevant_extract or result.snippet),
+        )
+        return outcome
+
+    def _usable_url_result(self, result: SearchResult) -> bool:
+        return bool(self.truth_guard.filter_results([result])) and has_usable_evidence(
+            result.relevant_extract or result.snippet
+        )
+
+    async def _call_fetch_provider(self, provider, plan, trace_id: str):
+        last_failure = None
+        for attempt in range(1, self.retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    provider.fetch_url(
+                        plan.query,
+                        query=plan.original,
+                        max_chars=self.context_builder.max_chars,
+                    ),
+                    timeout=self.provider_timeout,
+                )
+                if result is not None:
+                    result.provider = result.provider or f'{provider.name}-fetch'
+                logger.info(
+                    'WEB_FETCH_PROVIDER_SUCCESS trace_id=%s provider=%s attempt=%d usable=%s',
+                    trace_id,
+                    provider.name,
+                    attempt,
+                    bool(result and self._usable_url_result(result)),
+                )
+                return result, None, True
+            except asyncio.TimeoutError:
+                last_failure = ProviderFailure(provider.name, 'timeout', True, attempt)
+                logger.warning('WEB_FETCH_PROVIDER_TIMEOUT trace_id=%s provider=%s attempt=%d', trace_id, provider.name, attempt)
+            except Exception as exc:
+                last_failure = ProviderFailure(provider.name, type(exc).__name__, False, attempt)
+                logger.warning('WEB_FETCH_PROVIDER_FAILED trace_id=%s provider=%s attempt=%d exception_type=%s', trace_id, provider.name, attempt, type(exc).__name__)
+        return None, last_failure, False
+
     async def _call_provider(self, provider, plan, trace_id: str):
         last_failure = None
         for attempt in range(1, self.retries + 1):
@@ -218,3 +317,8 @@ class SearchPipeline:
 
     def invalidate_cache(self) -> None:
         self.cache.invalidate()
+
+
+def _is_http_url(value: str) -> bool:
+    parts = urlsplit((value or '').strip())
+    return parts.scheme in {'http', 'https'} and bool(parts.hostname)

@@ -162,7 +162,10 @@ class WebConfig(BaseModel):
     google_grounding_enabled: bool = True
     tavily_enabled: bool = False
     searxng_base_url: str = "http://127.0.0.1:8888"
+    wigolo_enabled: bool = False
+    wigolo_base_url: str = "http://127.0.0.1:3333"
     max_search_results: int = 6
+    max_fetch_pages_per_query: int = 2
     request_timeout_seconds: int = 12
     provider_retries: int = 1
     cache_ttl_seconds: int = 1800

@@ -31,8 +31,9 @@ class SearchIntentDetector:
         r'(از\s+اینترنت|از\s+وب).{0,40}(پیدا|بگرد|جستجو)',
     )
 
-    def detect(self, text: str) -> SearchIntent:
+    def detect(self, text: str, *, reply_text: str = '') -> SearchIntent:
         low = _normalize(text)
+        reply_low = _normalize(reply_text)
         explicit_search = bool(re.search(r'(?:سرچ|جستجو|بگرد|از\s+اینترنت|از\s+وب|search|find|look\s+up)', low))
         # A factual question quoted inside a story is not the current user's request.
         # Keep explicit search commands authoritative even when the message quotes someone.
@@ -45,9 +46,9 @@ class SearchIntentDetector:
             return SearchIntent(True, SearchKind.IMAGE, False, 'image_search')
         if re.search(r'(^|\s)(محصول|کالا|product)(\s|$)', low) and any(x in low for x in ('سرچ', 'جستجو', 'search')):
             return SearchIntent(True, SearchKind.PRODUCT, False, 'product_search')
-        # Any public URL plus a question/reference to "this" is an inspection request,
-        # regardless of colloquial wording or whether the question comes before the URL.
-        url_inspection = bool(re.search(r'https?://\S+', low)) and bool(
+        # The URL may be in the current message or the Telegram reply target, but
+        # the request wording must come from the current user message.
+        url_inspection = bool(re.search(r'https?://\S+', low) or re.search(r'https?://\S+', reply_low)) and bool(
             re.search(r'(?:این|اون|چه|چی|چیه|چیست|قیمت|مشخصات|سایت|لینک|محصول|کالا|\?|؟)', low)
         )
         needed = url_inspection or is_current_market_query(low) or any(re.search(pattern, low) for pattern in self._web_patterns)
@@ -56,7 +57,9 @@ class SearchIntentDetector:
             needed = False
         if re.search(r'(?:نظرت|فکر می.?کنی|به\s+نظر)\s+.{0,20}(?:چیست|چیه|چطور|چگونه)', low) and not re.search(r'(?:سرچ|جستجو|بگرد|از اینترنت|از وب|search|look up|تحلیل|بررسی)', low):
             needed = False
-        if is_current_market_query(low):
+        if url_inspection:
+            category = 'url_inspection'
+        elif is_current_market_query(low):
             category = 'current_price_or_market_query'
         elif re.search(r'(آخرین|اخرین|خبر|اخبار|news|today|امروز)', low):
             category = 'latest_news'

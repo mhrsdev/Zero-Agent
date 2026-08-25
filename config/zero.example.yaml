@@ -67,7 +67,10 @@ web:
   google_grounding_enabled: true
   tavily_enabled: false
   searxng_base_url: "http://127.0.0.1:8888"
+  wigolo_enabled: false
+  wigolo_base_url: "http://127.0.0.1:3333"
   max_search_results: 6
+  max_fetch_pages_per_query: 2
   request_timeout_seconds: 12
   provider_retries: 1
   cache_ttl_seconds: 1800

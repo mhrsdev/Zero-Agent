@@ -1037,7 +1037,7 @@ class ZeroBrain:
         deep_search = search_mode == 'deep' or is_deep_search_request(clean_user_text)
         is_telegram_request = is_telegram_search_request(clean_user_text)
         web_enabled = await self.web.is_tool_enabled()
-        natural_web_intent = bool(search_text and needs_web_search(search_text))
+        natural_web_intent = bool(search_text and needs_web_search(search_text, reply_text=message.reply_text))
         market_tool_intent = bool(search_text and is_current_price_or_market_query(search_text))
         web_intent = bool(search_text and (search_command or natural_web_intent) and not market_tool_intent)
         logger.info('WEB_SEARCH_ENABLED_CHECK trace_id=%s enabled=%s intent=%s natural=%s market_tool=%s mode=%s', trace_id, web_enabled, web_intent, natural_web_intent, market_tool_intent, search_mode or 'natural')
@@ -1100,10 +1100,14 @@ class ZeroBrain:
                         web_outcome.results[0].url,
                         searched_at_utc,
                     )
+            elif web_outcome.intent.category == 'url_inspection' and (web_outcome.all_providers_failed or web_outcome.no_results):
+                self.web.mark_response_sent(trace_id=trace_id, result_count=0, guarded=True)
+                logger.info('WEB_INTERNAL_STATUS_SUPPRESSED trace_id=%s reason=url_unreadable', trace_id)
+                return decision, 'این لینک را به محتوای قابل‌خواندن تبدیل نکردم؛ لینک منبع اصلی یا اسکرین‌شات را بفرست تا دقیق بررسی کنم.'
             elif web_outcome.all_providers_failed:
                 self.web.mark_response_sent(trace_id=trace_id, result_count=0, guarded=True)
                 logger.info('WEB_INTERNAL_STATUS_SUPPRESSED trace_id=%s reason=providers_failed', trace_id)
-                return decision, 'فعلاً Google Search در دسترس نیست؛ کمی بعد دوباره امتحان کن.'
+                return decision, 'فعلاً وب‌سرچ در دسترس نیست؛ کمی بعد دوباره امتحان کن.'
             elif web_outcome.no_results:
                 self.web.mark_response_sent(trace_id=trace_id, result_count=0, guarded=True)
                 logger.info('WEB_INTERNAL_STATUS_SUPPRESSED trace_id=%s reason=no_results', trace_id)

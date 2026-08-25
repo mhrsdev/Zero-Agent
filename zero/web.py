@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urlsplit
 
 from .config import ZeroConfig
 from .google_grounding import GoogleGroundingSearch
@@ -15,19 +15,18 @@ from .web_search.cache import TTLCache
 from .web_search.context import WebContextBuilder
 from .web_search.extraction import WebExtractor
 from .web_search.intent import SearchIntentDetector, is_current_market_query
-from .web_search.models import QueryPlan, SearchIntent, SearchKind, SearchOutcome, SearchResult
+from .web_search.models import SearchIntent, SearchOutcome, SearchResult
 from .web_search.orchestrator import SearchOrchestrator
 from .web_search.pipeline import SearchPipeline
 from .web_search.providers.base import ProviderRegistry
 from .web_search.providers.searxng import SearXNGProvider
 from .web_search.providers.tavily import TavilyProvider
+from .web_search.providers.wigolo import WigoloProvider
 from .web_search.query import QueryRewriter
 from .web_search.transport import ConnectionPoolTransport
 from .web_search.truth import TruthfulnessGuard
 
 logger = logging.getLogger('zero.web')
-_DIRECT_URL_RE = re.compile(r'https?://[^\s<>\[\]()]+', re.I)
-_DIRECT_URL_QUESTION_RE = re.compile(r'(?:این|اون|چه|چی|چیه|چیست|قیمت|مشخصات|سایت|لینک|محصول|کالا|\?|؟)', re.I)
 
 
 @dataclass(slots=True)
@@ -44,13 +43,13 @@ class SearchHit:
 class ExplicitCommandIntentDetector:
     """Shared natural-language detector used by every web-capable feature."""
 
-    def detect(self, text: str) -> SearchIntent:
-        return SearchIntentDetector().detect(text)
+    def detect(self, text: str, *, reply_text: str = '') -> SearchIntent:
+        return SearchIntentDetector().detect(text, reply_text=reply_text)
 
 
-def needs_web_search(text: str) -> bool:
+def needs_web_search(text: str, *, reply_text: str = '') -> bool:
     """Return whether the shared research planner needs fresh web evidence."""
-    return SearchIntentDetector().detect(text).needed
+    return SearchIntentDetector().detect(text, reply_text=reply_text).needed
 
 
 def is_deep_search_request(text: str) -> bool:
@@ -67,14 +66,17 @@ def build_search_query(current_text: str, *, reply_text: str = '', recent_messag
 
 
 class HybridWeb:
-    """Google Grounding primary with strictly ordered local SearXNG fallback tiers."""
+    """Provider-neutral web search with direct URL inspection and local fallback."""
 
     def __init__(self, config: ZeroConfig, store=None, *, transport=None, primary=None, **_ignored):
         self.config = config
         self.store = store
         self._transport = transport or ConnectionPoolTransport(
             user_agent='Zero-LocalSearch/1.0',
-            allowed_private_endpoints={('http', '127.0.0.1', 8888)},
+            allowed_private_endpoints={
+                ('http', '127.0.0.1', 8888),
+                ('http', '127.0.0.1', 3333),
+            },
         )
         self._primary = primary or GoogleGroundingSearch(config, IndependentRouter(config), store)
 
@@ -91,29 +93,37 @@ class HybridWeb:
             ))
         elif self._tavily_configured:
             logger.warning("TAVILY_UNAVAILABLE reason=missing_api_key")
+        if config.web.wigolo_enabled and config.web.wigolo_base_url:
+            registry.register(WigoloProvider(
+                config.web.wigolo_base_url,
+                self._transport,
+                max_results=config.web.max_search_results,
+                timeout=config.web.request_timeout_seconds,
+            ))
         provider_args = {
             'base_url': config.web.searxng_base_url,
             'transport': self._transport,
             'max_results': config.web.max_search_results,
             'timeout': config.web.request_timeout_seconds,
         }
-        registry.register(SearXNGProvider(
-            **provider_args, engines=('google cse',), name='searxng-google', priority=10,
-        ))
-        registry.register(SearXNGProvider(
-            **provider_args, engines=('brave', 'startpage'),
-            name='searxng-brave-startpage', priority=20,
-        ))
-        registry.register(SearXNGProvider(
-            **provider_args, engines=('duckduckgo',),
-            name='searxng-duckduckgo', priority=30,
-        ))
+        if config.web.searxng_base_url:
+            registry.register(SearXNGProvider(
+                **provider_args, engines=('google cse',), name='searxng-google', priority=10,
+            ))
+            registry.register(SearXNGProvider(
+                **provider_args, engines=('brave', 'startpage'),
+                name='searxng-brave-startpage', priority=20,
+            ))
+            registry.register(SearXNGProvider(
+                **provider_args, engines=('duckduckgo',),
+                name='searxng-duckduckgo', priority=30,
+            ))
         self._local_pipeline = SearchPipeline(
             registry=registry,
             retries=config.web.provider_retries,
             provider_timeout=config.web.request_timeout_seconds,
             max_results=config.web.max_search_results,
-            max_fetch_pages=0,
+            max_fetch_pages=config.web.max_fetch_pages_per_query,
             max_parallel_providers=1,
             cache=TTLCache(config.web.cache_ttl_seconds),
             context_builder=WebContextBuilder(config.web.context_max_chars),
@@ -136,17 +146,6 @@ class HybridWeb:
 
     async def run(self, text: str, **kwargs) -> SearchOutcome:
         kwargs.setdefault('force_search', True)
-        url_match = _DIRECT_URL_RE.search(text or '')
-        if url_match and _DIRECT_URL_QUESTION_RE.search(text or ''):
-            url = url_match.group(0).rstrip('.,،؛؟!')
-            plan = QueryPlan(original=text or '', query=url, language='fa', preferred_domain=urlsplit(url).netloc)
-            intent = SearchIntent(True, SearchKind.WEB, True, 'direct_url_inspection')
-            try:
-                result = await self._local_pipeline.extractor.extract_url(url, text or '')
-                return SearchOutcome(intent=intent, plan=plan, results=[result], context=self._local_pipeline.context_builder.build(plan, [result]))
-            except Exception as exc:
-                logger.info('DIRECT_URL_FETCH_FAILED url_host=%s exception_type=%s', urlsplit(url).netloc, type(exc).__name__)
-                return SearchOutcome(intent=intent, plan=plan, no_results=True, all_providers_failed=True)
         return await self._orchestrator.run(text, **kwargs)
 
     def search(self, raw_query: str, enabled_override: Optional[bool] = None) -> list[SearchHit]:
@@ -158,15 +157,26 @@ class HybridWeb:
     async def health_check(self) -> tuple[bool, str]:
         if not self.enabled():
             return False, 'web search disabled'
+        if self.config.web.wigolo_enabled and self.config.web.wigolo_base_url:
+            try:
+                raw = await self._transport.get_text(
+                    f'{self.config.web.wigolo_base_url.rstrip("/")}/health',
+                    self.config.web.request_timeout_seconds,
+                    64_000,
+                )
+                if json.loads(raw).get('status') == 'healthy':
+                    return True, 'wigolo'
+            except Exception:
+                pass
         if self._tavily_configured:
             if self._tavily_available:
                 return True, 'tavily'
             return False, 'tavily API key missing'
+        if self.config.web.searxng_base_url:
+            return True, 'local-fallback'
         primary_ok, primary_error = await self._primary.health_check()
         if primary_ok:
             return True, 'google-grounding'
-        if self.config.web.searxng_base_url:
-            return True, f'local-fallback ({primary_error})'
         return False, primary_error or 'search providers unavailable'
 
     def invalidate_cache(self) -> None:
