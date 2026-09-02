@@ -7,8 +7,14 @@ import queue
 import socket
 import ssl
 import threading
-from collections import defaultdict
+from collections import OrderedDict
 from urllib.parse import urlsplit
+
+# Upper bound on how many distinct hosts may hold idle keep-alive sockets. The
+# idle pool was keyed by (scheme, host, port) with no eviction, so a listener
+# that searches thousands of distinct result hosts held an open socket to every
+# one of them until the peer reset it, walking towards the process FD limit.
+_MAX_IDLE_HOSTS = 32
 
 
 class ConnectionPoolTransport:
@@ -17,18 +23,42 @@ class ConnectionPoolTransport:
     def __init__(
         self, max_connections_per_host: int = 4, user_agent: str = 'Zero-WebSearch/2.0',
         *, allowed_private_endpoints: set[tuple[str, str, int]] | None = None,
+        max_idle_hosts: int = _MAX_IDLE_HOSTS,
     ):
         self.max_connections_per_host = max(1, int(max_connections_per_host))
         self.user_agent = user_agent
         self.allowed_private_endpoints = allowed_private_endpoints or set()
-        self._idle: dict[tuple[str, str, int], queue.LifoQueue] = defaultdict(queue.LifoQueue)
+        self.max_idle_hosts = max(1, int(max_idle_hosts))
+        # LRU by host: least-recently-used entries are closed once the bound is
+        # exceeded. Only idle sockets live here, so eviction can never close a
+        # connection that a request is still using.
+        self._idle: OrderedDict[tuple[str, str, int], queue.LifoQueue] = OrderedDict()
         self._semaphores: dict[tuple[str, str, int], asyncio.Semaphore] = {}
+        # Requests run in worker threads, so the pool map needs real mutual
+        # exclusion; this lock was previously created and never used.
         self._lock = threading.Lock()
         self._closed = False
 
     @property
     def pool_size(self) -> int:
-        return sum(pool.qsize() for pool in self._idle.values())
+        with self._lock:
+            return sum(pool.qsize() for pool in self._idle.values())
+
+    def _acquire_pool(self, key) -> queue.LifoQueue:
+        """Return the idle pool for ``key``, evicting the oldest hosts if needed."""
+        with self._lock:
+            pool = self._idle.get(key)
+            if pool is None:
+                pool = queue.LifoQueue(maxsize=self.max_connections_per_host)
+                self._idle[key] = pool
+            self._idle.move_to_end(key)
+            evicted = []
+            while len(self._idle) > self.max_idle_hosts:
+                _, stale = self._idle.popitem(last=False)
+                evicted.append(stale)
+        for stale in evicted:
+            _drain(stale)
+        return pool
 
     async def get_text(self, url: str, timeout: float, max_bytes: int) -> str:
         return await self._request_text("GET", url, timeout, max_bytes)
@@ -89,7 +119,7 @@ class ConnectionPoolTransport:
         path = parts.path or '/'
         if parts.query:
             path += '?' + parts.query
-        pool = self._idle[key]
+        pool = self._acquire_pool(key)
         try:
             connection = pool.get_nowait()
         except queue.Empty:
@@ -115,7 +145,12 @@ class ConnectionPoolTransport:
             return response_body[:max_bytes].decode(charset, 'replace')
         finally:
             if reusable and not self._closed:
-                pool.put(connection)
+                try:
+                    pool.put_nowait(connection)
+                except queue.Full:
+                    # Bounded pool: never hold more idle sockets per host than
+                    # the concurrency limit allows.
+                    connection.close()
             else:
                 connection.close()
 
@@ -146,9 +181,22 @@ class ConnectionPoolTransport:
 
     def close(self) -> None:
         self._closed = True
-        for pool in self._idle.values():
-            while True:
-                try:
-                    pool.get_nowait().close()
-                except queue.Empty:
-                    break
+        with self._lock:
+            pools = list(self._idle.values())
+            self._idle.clear()
+            self._semaphores.clear()
+        for pool in pools:
+            _drain(pool)
+
+
+def _drain(pool: queue.LifoQueue) -> None:
+    """Close every idle connection held by ``pool``."""
+    while True:
+        try:
+            connection = pool.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            connection.close()
+        except OSError:
+            pass

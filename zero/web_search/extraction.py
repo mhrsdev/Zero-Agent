@@ -27,7 +27,7 @@ class WebExtractor:
 
     async def extract_many(self, results: list[SearchResult], query: str, limit: int) -> list[SearchResult]:
         async def one(result: SearchResult) -> None:
-            if not _safe_public_url(result.url):
+            if not await _safe_public_url_async(result.url):
                 return
             try:
                 html = await self.transport.get_text(result.url, self.request_timeout, self.max_bytes)
@@ -40,7 +40,7 @@ class WebExtractor:
         return results
 
     async def extract_url(self, url: str, query: str = '') -> SearchResult:
-        if not _safe_public_url(url):
+        if not await _safe_public_url_async(url):
             raise ValueError('unsafe public URL')
         html = await self.transport.get_text(url, self.request_timeout, self.max_bytes)
         title_match = re.search(r'<title[^>]*>(.*?)</title>', html or '', flags=re.I | re.S)
@@ -48,6 +48,17 @@ class WebExtractor:
         text = _html_to_text(html)
         extract = _relevant_extract(text, query or title, self.max_extract_chars)
         return SearchResult(title=title[:300], url=url, snippet=extract[:500], relevant_extract=extract, provider='direct-url')
+
+
+async def _safe_public_url_async(url: str) -> bool:
+    """Await the SSRF guard instead of resolving DNS on the event loop.
+
+    ``socket.getaddrinfo`` is synchronous and takes no timeout, so an
+    unreachable resolver blocked the whole loop for the OS resolver timeout --
+    once per result, up to 15 results per deep search. The synchronous form is
+    kept for ``ConnectionPoolTransport``, which already runs in a worker thread.
+    """
+    return await asyncio.to_thread(_safe_public_url, url)
 
 
 def _safe_public_url(url: str) -> bool:
