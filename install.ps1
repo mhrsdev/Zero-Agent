@@ -1,6 +1,9 @@
 # Zero one-line installer for Windows (PowerShell 5.1+).
 # Idempotent: safe to re-run; never prints secret values.
 $ErrorActionPreference = "Stop"
+# Strict mode turns a typo or an unassigned variable into a visible failure
+# instead of an empty string silently interpolated into a user-facing command.
+Set-StrictMode -Version 2.0
 
 function Say($m)  { Write-Host "[install] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[install] $m" -ForegroundColor Yellow }
@@ -33,6 +36,10 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
 $VenvPy = ".venv\Scripts\python.exe"
 
 # 4) Dependencies (locked versions when available).
+# Resolved once, before any install branch, because step 4's "update" hint
+# prints it: assigning it inside a branch left it empty on the uv path.
+$Req = if (Test-Path "requirements.lock") { "requirements.lock" } else { "requirements.txt" }
+
 # A pre-existing venv may lack pip (e.g. created by uv): bootstrap it, fall
 # back to uv, and only then give up with an actionable message.
 # NOTE: probes run through cmd so pip's stderr never reaches PowerShell --
@@ -49,13 +56,12 @@ if (-not (Test-VenvPip)) {
 }
 $Uv = Get-Command uv -ErrorAction SilentlyContinue
 if ((-not (Test-VenvPip)) -and $Uv) {
-  Say "pip unavailable; using uv against the existing venv"
-  & $Uv pip install -r $(if (Test-Path "requirements.lock") { "requirements.lock" } else { "requirements.txt" }) --python $VenvPy
+  Say "pip unavailable; using uv against the existing venv from $Req"
+  & $Uv pip install -r $Req --python $VenvPy
   if ($LASTEXITCODE -ne 0) { Die "dependency installation via uv failed" }
 } elseif (-not (Test-VenvPip)) {
   Die ".venv exists without pip and neither ensurepip nor uv could provide one; delete .venv and re-run"
 } else {
-  $Req = if (Test-Path "requirements.lock") { "requirements.lock" } else { "requirements.txt" }
   Say "installing dependencies from $Req"
   & $VenvPy -m pip install --upgrade pip | Out-Null
   & $VenvPy -m pip install -r $Req
