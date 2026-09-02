@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -12,10 +13,25 @@ FORBIDDEN_NAMES = {
     '.git', '.venv', 'venv', 'node_modules', 'runtime', 'backups', 'archive',
     'PROPRIETARY_LICENSE',
 }
+# Vendored dependency trees. These are forbidden in a public artifact and are
+# reported once for the directory rather than once per contained file, so a
+# dependency's own PEM/token literals can never masquerade as project findings.
+# Detection is structural as well as by name: an environment called .venv311w
+# used to pass the name check while its site-packages were still scanned as
+# project source.
+VENDOR_NAMES = {'.venv', 'venv', 'node_modules', 'site-packages'}
+# Build and tool output. Pruned silently: it either duplicates project source
+# (build/, dist/, *.egg-info) or is regenerated cache (__pycache__, tool
+# caches), so scanning it adds no finding a source scan would miss.
+GENERATED_NAMES = {
+    '__pycache__', '.pytest_cache', '.ruff_cache', '.mypy_cache', '.tox',
+    'build', 'dist',
+}
 FORBIDDEN_SUFFIXES = {
     '.db', '.db-wal', '.db-shm', '.sqlite', '.sqlite3', '.session',
     '.session-journal', '.log', '.enc', '.pass', '.key', '.pem', '.p12',
 }
+
 FORBIDDEN_PATH_PARTS = {
     'telegram_search', 'tgsearch', 'local_search', 'searxng',
 }
@@ -43,6 +59,42 @@ def is_text(path: Path) -> bool:
     return path.suffix.lower() in TEXT_SUFFIXES or path.name in {'README', 'LICENSE'}
 
 
+def is_virtualenv(path: Path) -> bool:
+    """Detect a virtualenv structurally rather than by directory name.
+
+    Matching only ``.venv``/``venv`` let a differently named environment
+    (``.venv311w``, ``env-3.12``) pass the path check while its vendored
+    dependency source was still read and pattern-matched as project content.
+    """
+    return (path / 'pyvenv.cfg').is_file()
+
+
+def walk_pruned(root: Path) -> tuple[list[Path], list[Path]]:
+    """Return (files, vendored_dirs), skipping vendored and generated subtrees.
+
+    ``.git`` is audited separately with git status/fsck/ref scans, so it is
+    pruned without being reported.
+    """
+    files: list[Path] = []
+    vendored: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        current = Path(dirpath)
+        keep: list[str] = []
+        for name in sorted(dirnames):
+            child = current / name
+            if name == '.git':
+                continue
+            if name in VENDOR_NAMES or is_virtualenv(child):
+                vendored.append(child)
+                continue
+            if name in GENERATED_NAMES or name.endswith('.egg-info'):
+                continue
+            keep.append(name)
+        dirnames[:] = keep
+        files.extend(current / name for name in sorted(filenames))
+    return files, vendored
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('root', type=Path)
@@ -52,13 +104,17 @@ def main() -> int:
     root = args.root.resolve()
     findings: list[dict[str, str]] = []
 
-    for path in sorted(p for p in root.rglob('*') if p.is_file()):
+    files, vendored_dirs = walk_pruned(root)
+    for directory in vendored_dirs:
+        findings.append({
+            'category': 'forbidden_path',
+            'path': directory.relative_to(root).as_posix(),
+        })
+
+    for path in sorted(p for p in files if p.is_file()):
         rel = path.relative_to(root)
         parts = set(rel.parts)
         name = path.name
-        # Git metadata is audited separately with git status/fsck/ref scans.
-        if '.git' in parts:
-            continue
         if any(part in FORBIDDEN_NAMES for part in parts):
             if name == 'PROPRIETARY_LICENSE' and args.allow_proprietary_license:
                 pass

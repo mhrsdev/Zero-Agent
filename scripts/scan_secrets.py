@@ -8,6 +8,7 @@ Usage: python scripts/scan_secrets.py [root]
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,8 +26,45 @@ PATTERNS = {
     "google_api_key": re.compile(r"AIza[0-9A-Za-z_-]{35}"),
 }
 
-SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "node_modules", "panel"}
+# Third-party dependency source and generated caches are not repository
+# content: their contents are decided upstream, they cannot leak this
+# installation's credentials, and their own pattern literals (rsa's PEM
+# examples, telethon's generated TL kwargs, cache digests) previously made this
+# gate fail on any developer checkout.
+SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", "panel",
+    ".pytest_cache", ".ruff_cache", ".mypy_cache", ".tox",
+    "build", "dist", "site-packages",
+}
 SKIP_SUFFIXES = {".png", ".jpg", ".gif", ".ico", ".db", ".session", ".zip", ".whl", ".min.js"}
+
+
+def is_virtualenv(path: Path) -> bool:
+    """Detect a virtualenv structurally rather than by directory name.
+
+    Matching only the conventional ``.venv``/``venv`` names let a differently
+    named environment (``.venv311w``, ``env-3.12``) be scanned as if it were
+    repository source.
+    """
+    return (path / "pyvenv.cfg").is_file()
+
+
+def should_skip_dir(path: Path) -> bool:
+    return (
+        path.name in SKIP_DIRS
+        or path.name.endswith(".egg-info")
+        or is_virtualenv(path)
+    )
+
+
+def iter_files(root: Path):
+    """Walk ``root``, pruning skipped subtrees instead of descending into them."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        current = Path(dirpath)
+        dirnames[:] = sorted(d for d in dirnames if not should_skip_dir(current / d))
+        for name in sorted(filenames):
+            yield current / name
+
 
 # Known-safe adversarial test fixtures. Each entry is matched verbatim and is
 # still REPORTED on every run -- it just does not fail the gate. Nothing is
@@ -42,15 +80,13 @@ KNOWN_FIXTURES = {
 
 def main() -> int:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
-    hits: list[str] = []
+    hits: list[tuple[str, str, int, str]] = []
     self_path = Path(__file__).resolve()
-    for path in root.rglob("*"):
+    for path in iter_files(root):
         if not path.is_file():
             continue
         if path.resolve() == self_path:
             continue  # never scan the scanner's own pattern literals
-        if SKIP_DIRS & set(path.parts):
-            continue
         if path.suffix.lower() in SKIP_SUFFIXES:
             continue
         try:
