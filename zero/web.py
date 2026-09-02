@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -148,10 +147,23 @@ class HybridWeb:
         kwargs.setdefault('force_search', True)
         return await self._orchestrator.run(text, **kwargs)
 
-    def search(self, raw_query: str, enabled_override: Optional[bool] = None) -> list[SearchHit]:
+    async def search_hits(self, raw_query: str, enabled_override: Optional[bool] = None) -> list[SearchHit]:
+        """Legacy hit-shaped view of :meth:`run`, awaited on the caller's loop.
+
+        This deliberately has no synchronous counterpart. The previous
+        ``search()`` wrapper called ``asyncio.run(self.run(...))`` and its only
+        caller reached it through ``asyncio.to_thread``. That started a second,
+        throwaway event loop while the same ``HybridWeb`` was in use on the main
+        loop, and the shared ``ConnectionPoolTransport`` caches one
+        ``asyncio.Semaphore`` per host: whichever loop contended first owned it,
+        so the semaphore could end up bound to a closed loop and every later
+        request raised ``RuntimeError: ... is bound to a different event loop``.
+        The pipeline recorded that as a generic provider failure, so news and
+        knowledge digests returned empty results for the life of the process.
+        """
         if enabled_override is False or (enabled_override is None and not self.enabled()):
             return []
-        outcome = asyncio.run(self.run(raw_query))
+        outcome = await self.run(raw_query)
         return [self._compat_hit(result) for result in outcome.results]
 
     async def health_check(self) -> tuple[bool, str]:
