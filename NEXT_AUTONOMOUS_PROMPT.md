@@ -1,5 +1,21 @@
 # Autonomous Zero Transformation Continuation
 
+> **Superseded — historical record.** Every checkpoint fact below describes the
+> private `open-source/v0.1-transformation` working branch, not this repository's
+> `main`. Read it as history, not as current state. Specifically:
+>
+> - the referenced checkout root, branch and `HEAD` (`bb8d56d`) do not exist
+>   here; `bb8d56d` is not a reachable object in this repository;
+> - the "Current atomic task — P0-1" section is **done**: no bare group index
+>   remains in `scripts/`, `last_starter_at` / `last_interject_at` are per-group
+>   keys (`scripts/run_listener.py`, `zero/brain.py`), and the guards live in
+>   `tests/test_p0_listener_tenancy_guard.py` and `tests/test_tenancy_isolation.py`;
+> - the "652 passed, 1 skipped" figure is long out of date;
+> - `ruff` and `pip-audit` do now run — see `.github/workflows/ci.yml`.
+>
+> For current state use `README.md`, `KNOWN_LIMITATIONS.md` and the CI workflow.
+> `docs/` and `RECONSTRUCTION_MATRIX.md` remain the subsystem-level references.
+
 Reconciled from the Opus execution plan produced at `6137075` and the real
 repository checkpoint `57f2693`. Read this file, then
 `REMAINING_WORK_PLAN.md` and `SESSION_EXECUTION_PLAN.md`. You need no chat
