@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -792,7 +793,32 @@ async def main() -> None:
             await message.answer('subcommand نامعتبره.')
         logger.info('OWNER_CMD sub=%s', sub)
 
-    await dp.start_polling(bot)
+    # start_polling used to be the last statement of the process, so nothing
+    # released the panel's listening socket or closed the aiogram HTTP session:
+    # SIGTERM left "Unclosed client session" warnings and tore down in-flight
+    # SSE responses mid-write. Teardown is shielded so a cancellation delivered
+    # during shutdown cannot abandon it half-done.
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await asyncio.shield(_shutdown(logger, panel_api, bot))
+
+
+async def _shutdown(logger, panel_api, bot) -> None:
+    """Release the panel socket and the bot session; never raise.
+
+    Teardown failures are logged and swallowed on purpose: they must not mask
+    the exception or signal that caused the process to stop.
+    """
+    try:
+        await panel_api.stop()
+    except Exception as exc:
+        logger.warning('PANEL_SHUTDOWN_FAILED error=%s', type(exc).__name__)
+    try:
+        await bot.session.close()
+    except Exception as exc:
+        logger.warning('BOT_SESSION_CLOSE_FAILED error=%s', type(exc).__name__)
+    logger.info('ZERO_PANEL_STOPPED')
 
 
 if __name__ == '__main__':

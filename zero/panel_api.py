@@ -22,6 +22,15 @@ from .panel_store import DuplicateAdminError, PanelStore
 from .paths import zero_home_path
 
 _PAGE_MAX = 100
+# Upper bound on how much of a log file the panel reads per poll. The SSE
+# endpoints re-read on a 2s/5s timer for every connected browser tab, so
+# reading whole files would stall the event loop and spike RSS by the file size
+# once listener.log reaches production size.
+_LOG_TAIL_BYTES = 1 << 20
+_LOG_TAIL_LINES = 2000
+# Sweep idle rate-limit windows once the key set grows past this; keeps the
+# middleware O(1) in the common case instead of scanning on every request.
+_RATE_KEYS_SWEEP_AT = 256
 _SECRET = re.compile(r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*)([^\s,;]+)|\b[A-Za-z0-9_-]{32,}\b")
 _ALLOWED_SETTINGS = {
     'web_enabled','vision_enabled','mode','limit_challenge_enabled',
@@ -36,6 +45,28 @@ _MEMORY_TABLES = {
     'procedural':'procedural_memory','procedural-candidates':'procedural_memory_candidates',
     'world':'world_entities','world-relations':'world_relations',
 }
+
+
+def _tail_lines(path: Path, max_bytes: int, max_lines: int) -> list[str]:
+    """Return at most ``max_lines`` trailing lines, reading at most ``max_bytes``.
+
+    Seeking to the tail keeps panel log polling independent of file size. The
+    first line of the window is dropped when the window started mid-file, so a
+    truncated line is never reported or redaction-matched as a whole record.
+    """
+    try:
+        with path.open('rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            start = max(0, size - max_bytes)
+            handle.seek(start)
+            chunk = handle.read()
+    except OSError:
+        return []
+    lines = chunk.decode('utf-8', errors='replace').splitlines()
+    if start and lines:
+        lines = lines[1:]
+    return lines[-max_lines:]
 
 
 class PanelAPI:
@@ -88,6 +119,11 @@ class PanelAPI:
             return await handler(request)
         now=time.time(); bucket='auth' if request.path.startswith('/api/auth/') else 'api'; key=f'{request.remote or "local"}:{bucket}'; q=self._request_hits.setdefault(key,deque())
         while q and q[0] < now-60: q.popleft()
+        # Trimming the deques is not enough: the dict keeps one entry per client
+        # address forever, and behind a reverse proxy the address is
+        # caller-controlled. Drop windows that have gone idle.
+        if len(self._request_hits)>_RATE_KEYS_SWEEP_AT:
+            for stale in [k for k,v in self._request_hits.items() if not v and k!=key]: self._request_hits.pop(stale,None)
         limit=30 if bucket=='auth' else 600
         if len(q)>=limit: return self._json_error('Rate limit exceeded.',429)
         q.append(now); return await handler(request)
@@ -114,7 +150,10 @@ class PanelAPI:
         data = await self._body(request)
         try:
             username, password = str(data.get('username', '')), str(data.get('password', ''))
-            admin_id = self.panel_store.create_admin(username, password, must_change_password=(username.strip().lower() == 'admin' and password == 'Admin'))
+            # scrypt with n=2**14 costs ~16MB and ~50-100ms of CPU. Run it off
+            # the event loop so an auth burst cannot stall the panel and its SSE
+            # streams.
+            admin_id = await asyncio.to_thread(self.panel_store.create_admin, username, password, must_change_password=(username.strip().lower() == 'admin' and password == 'Admin'))
         except DuplicateAdminError:
             return self._json_error('Administrator already exists', 409)
         except ValueError as exc:
@@ -125,7 +164,7 @@ class PanelAPI:
         if not self.panel_store:
             return self._json_error('Local authentication is unavailable', 503)
         data = await self._body(request)
-        admin = self.panel_store.verify_admin(str(data.get('username', '')), str(data.get('password', '')))
+        admin = await asyncio.to_thread(self.panel_store.verify_admin, str(data.get('username', '')), str(data.get('password', '')))
         if not admin:
             return self._json_error('Invalid username or password', 401)
         token, csrf = self.panel_store.create_session(int(admin['id']))
@@ -143,7 +182,7 @@ class PanelAPI:
             return self._json_error('Local authentication is unavailable', 503)
         try:
             data = await self._body(request)
-            self.panel_store.change_admin_password(int(session['admin_id']), str(data.get('current_password', '')), str(data.get('new_password', '')))
+            await asyncio.to_thread(self.panel_store.change_admin_password, int(session['admin_id']), str(data.get('current_password', '')), str(data.get('new_password', '')))
         except ValueError as exc:
             return self._json_error(str(exc), 400)
         return web.json_response({'changed': True})
@@ -186,8 +225,13 @@ class PanelAPI:
 
     def _hash(self, value): return hmac.new(int(self.config.owner_user_id).to_bytes(8,'big',signed=False),value.encode(),hashlib.sha256).hexdigest()
     def _session(self, request):
+        now=time.time()
+        # Expiry was only tested on lookup, never applied, so dead sessions
+        # stayed in the dict for the process lifetime and _session_list reported
+        # them as live.
+        for stale in [k for k,v in self.sessions.items() if v['expires']<=now]: self.sessions.pop(stale,None)
         raw=request.cookies.get('zero_session'); item=self.sessions.get(self._hash(raw or '')) if raw else None
-        return item if item and item['expires']>time.time() else None
+        return item if item and item['expires']>now else None
     def _require(self, request, *, csrf=False, write=False):
         session=self._session(request)
         if not session:
@@ -299,7 +343,11 @@ class PanelAPI:
         for _ in range(12):
             try:
                 payload=await self._dashboard_payload(); payload['recent_errors']=self._read_logs(limit=3,level='ERROR')['items']; await response.write(f"data: {json.dumps(payload,ensure_ascii=False)}\n\n".encode()); await asyncio.sleep(5)
-            except (ConnectionResetError,asyncio.CancelledError):break
+            # CancelledError is a BaseException and must propagate: swallowing it
+            # leaves the handler running after shutdown cancelled it, so
+            # AppRunner.cleanup() waits out its graceful timeout instead of
+            # completing.
+            except ConnectionResetError:break
         return response
 
     async def _chats(self,request):
@@ -377,7 +425,7 @@ class PanelAPI:
         paths=[Path(self.config.logs.listener_log),Path(self.config.logs.panel_log),Path(self.config.logs.router_log),zero_home_path('logs', 'requests.log')];items=[]
         for path in paths:
             if not path.exists():continue
-            for line in path.read_text(errors='replace').splitlines()[-2000:]:
+            for line in _tail_lines(path,_LOG_TAIL_BYTES,_LOG_TAIL_LINES):
                 if level and level.upper() not in line.upper():continue
                 if component and component.lower() not in (path.stem+' '+line).lower():continue
                 if trace and trace not in line:continue
@@ -394,7 +442,8 @@ class PanelAPI:
                 items=self._read_logs(limit=5,level='ERROR')['items'];payload=json.dumps(items,ensure_ascii=False)
                 if payload!=seen:await response.write(f'data: {payload}\n\n'.encode());seen=payload
                 await asyncio.sleep(2)
-            except (ConnectionResetError,asyncio.CancelledError):break
+            # See _realtime: cancellation must not be caught here either.
+            except ConnectionResetError:break
         return response
 
     async def _jobs(self,request):
@@ -440,3 +489,15 @@ class PanelAPI:
 
     async def start(self,host='127.0.0.1',port=8787):
         runner=web.AppRunner(self.app);await runner.setup();site=web.TCPSite(runner,host,port);await site.start();self.runner=runner;return runner
+
+    async def stop(self):
+        """Release the listening socket and finish in-flight responses.
+
+        Without this the panel's TCP socket was reclaimed only by process exit,
+        so SIGTERM tore down open SSE streams mid-write and a restart could hit
+        an address still held by the outgoing process.
+        """
+        runner=getattr(self,'runner',None)
+        if runner is None:return
+        self.runner=None
+        await runner.cleanup()
