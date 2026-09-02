@@ -105,6 +105,12 @@ def deterministic_market_tool_calls(text: str) -> list[dict]:
 
 
 _VALID_MOODS = CANONICAL_MOODS
+# Wall-clock ceiling for one web-search pipeline run. Only the deep path was
+# bounded before; a normal search could run for the sum of every provider
+# budget (grounding 45s plus serial local providers at 12s each) while holding
+# the listener's message lock, so one slow query froze replies in every group.
+_SEARCH_TIMEOUT_SECONDS = 45.0
+_DEEP_SEARCH_TIMEOUT_SECONDS = 45.0
 _STICKER_WORDS_FA = ('استیکر', 'sticker', 'sticer')
 _STICKER_WORDS_EN = ('sticker',)
 _INTERNAL_SEARCH_STATUS_RE = re.compile(r'(?im)^\s*(?:WEB_STATUS|TG_STATUS|GOOGLE_GROUNDING_STATUS)\s*:\s*[^\r\n]*\r?\n?')
@@ -304,13 +310,35 @@ class ZeroBrain:
         self.social_plus = SocialAwarenessPlus(store)
         self._client = client
         self.zero_user_id: int | None = None
-        # One-shot flag per conversation turn to avoid duplicate sticker sends
-        # (create_task may race with a slow _send_sticker_async).
-        self._turn_sticker_marker = set()  # mood strings queued this turn
         self._sticker_send_lock = asyncio.Lock()
         self._sticker_rng = sticker_rng or random.Random()
         self._gif_send_lock = asyncio.Lock()
         self._gif_rng = gif_rng or random.Random()
+        # Handles for sends started concurrently from a synchronous return path.
+        # A previous `_turn_sticker_marker` set claimed to de-duplicate those
+        # sends but was never read or written; `_sticker_send_lock` is the real
+        # serialisation. What was actually missing is a reference: without one
+        # the event loop keeps only a weak reference to a task that is not
+        # currently executing, so the send can be collected mid-flight, and a
+        # failure is never reported.
+        self._background: set[asyncio.Task] = set()
+
+    def _spawn(self, coro, name: str) -> asyncio.Task:
+        """Start ``coro`` concurrently, keeping a handle and logging failures."""
+        task = asyncio.ensure_future(coro)
+        task.set_name(name)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._log_background_failure)
+        return task
+
+    @staticmethod
+    def _log_background_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning('BACKGROUND_SEND_FAILED task=%s exception_type=%s', task.get_name(), type(exc).__name__)
 
     # ------------------------------------------------------------------
     # STICKER SENDING
@@ -1073,10 +1101,13 @@ class ZeroBrain:
                     force_search=bool(search_command),
                     deep=deep_search,
                 )
-                web_outcome = await asyncio.wait_for(run_search, timeout=45.0) if deep_search else await run_search
+                web_outcome = await asyncio.wait_for(run_search, timeout=_DEEP_SEARCH_TIMEOUT_SECONDS if deep_search else _SEARCH_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                logger.warning('DEEP_SEARCH_TIMEOUT trace_id=%s timeout_seconds=45', trace_id)
-                return decision, 'سرچ عمیق به سقف زمانی رسید و نتیجهٔ قابل‌اعتماد کامل نشد؛ کمی بعد دوباره امتحان کن.'
+                if deep_search:
+                    logger.warning('DEEP_SEARCH_TIMEOUT trace_id=%s timeout_seconds=%s', trace_id, _DEEP_SEARCH_TIMEOUT_SECONDS)
+                    return decision, 'سرچ عمیق به سقف زمانی رسید و نتیجهٔ قابل‌اعتماد کامل نشد؛ کمی بعد دوباره امتحان کن.'
+                logger.warning('WEB_SEARCH_TIMEOUT trace_id=%s timeout_seconds=%s', trace_id, _SEARCH_TIMEOUT_SECONDS)
+                return decision, 'جستجو در این نوبت کامل نشد؛ کمی بعد دوباره امتحان کن.'
             except Exception as exc:
                 logger.warning('WEB_SEARCH_FAILED trace_id=%s exception_type=%s', trace_id, type(exc).__name__)
                 return decision, 'جستجو در این نوبت کامل نشد؛ کمی بعد دوباره امتحان کن.'
@@ -1528,5 +1559,5 @@ class ZeroBrain:
         # Starters could have STICKER:xxx if model hallucinates — sanitize defensively
         cleaned, mood = sanitize_outgoing_text(sanitize_internal_search_status(text))
         if mood and self.config.stickers.enabled:
-            asyncio.create_task(self._send_sticker_async(chat_id, mood))
+            self._spawn(self._send_sticker_async(chat_id, mood), 'starter_sticker')
         return cleaned
