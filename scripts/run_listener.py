@@ -818,18 +818,65 @@ async def main() -> None:
                 except Exception as recover_exc:
                     logger.warning('TELEGRAM_HEALTH_RECOVERY_FAILED exception_type=%s', type(recover_exc).__name__)
 
-    asyncio.create_task(telegram_health_loop())
-    asyncio.create_task(starter_loop())
-    asyncio.create_task(inactive_ping_loop())
-    asyncio.create_task(template_job_loop())
+    # Background loops were previously started with bare asyncio.create_task and
+    # nothing kept the handles. Three consequences, all silent: the event loop
+    # holds only a weak reference, so a task that is not currently executing is
+    # garbage-collectable; an exception escaping a loop body killed that feature
+    # for the process lifetime and surfaced only as "Task exception was never
+    # retrieved" at interpreter shutdown; and Ctrl-C closed the loop with pending
+    # tasks. Keep the handles, log every unexpected exit, cancel them on the way
+    # out.
+    background: set[asyncio.Task] = set()
+
+    def spawn(coro, name: str) -> None:
+        task = asyncio.ensure_future(coro)
+        task.set_name(name)
+        background.add(task)
+        task.add_done_callback(background.discard)
+        task.add_done_callback(lambda done: _report_loop_exit(logger, done))
+
+    spawn(telegram_health_loop(), 'telegram_health_loop')
+    spawn(starter_loop(), 'starter_loop')
+    spawn(inactive_ping_loop(), 'inactive_ping_loop')
+    spawn(template_job_loop(), 'template_job_loop')
     if config.office.enabled:
-        asyncio.create_task(office_coordinator_loop())
-    asyncio.create_task(proactive_followup_loop())
-    asyncio.create_task(social_reflection_loop())
-    asyncio.create_task(monthly_group_memory_loop())
+        spawn(office_coordinator_loop(), 'office_coordinator_loop')
+    spawn(proactive_followup_loop(), 'proactive_followup_loop')
+    spawn(social_reflection_loop(), 'social_reflection_loop')
+    spawn(monthly_group_memory_loop(), 'monthly_group_memory_loop')
     if config.reporting.send_daily_report_to_owner:
-        asyncio.create_task(daily_report_loop())
-    await client.run_until_disconnected()
+        spawn(daily_report_loop(), 'daily_report_loop')
+    try:
+        await client.run_until_disconnected()
+    finally:
+        # Shielded: a cancellation delivered during shutdown must not leave the
+        # Telethon session half-open, which on Windows keeps the session file
+        # locked against the next start.
+        await asyncio.shield(_shutdown(logger, client, list(background)))
+
+
+def _report_loop_exit(logger, task: asyncio.Task) -> None:
+    """Surface a background loop that stopped instead of losing it silently."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error('BACKGROUND_LOOP_CRASHED loop=%s exception_type=%s', task.get_name(), type(exc).__name__, exc_info=exc)
+    else:
+        logger.warning('BACKGROUND_LOOP_EXITED loop=%s', task.get_name())
+
+
+async def _shutdown(logger, client, tasks: list[asyncio.Task]) -> None:
+    """Cancel background loops and disconnect Telegram; never raise."""
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        await client.disconnect()
+    except Exception as exc:
+        logger.warning('TELEGRAM_DISCONNECT_FAILED exception_type=%s', type(exc).__name__)
+    logger.info('ZERO_LISTENER_STOPPED background_loops=%d', len(tasks))
 
 
 if __name__ == '__main__':
