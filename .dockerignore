@@ -1,26 +1,74 @@
 # Never let runtime state, credentials or history into the build context.
+#
+# Single-segment patterns only match at the context root, so every state and
+# credential pattern is repeated in `**/` form. A missing recursive form is how
+# a nested secret (e.g. config/zero.yaml) reaches an image layer.
 .git
 .gitignore
 .venv
+.venv*
 venv
 __pycache__
 **/__pycache__
 *.pyc
+**/*.pyc
+build/
+dist/
+*.egg-info
+**/*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
 runtime/
 backups/
 archive/
 data/
+docker-data/
+release/
+public-release/
+.zero-public/
+
+# Local credential and runtime-config layers. `config/` is COPYied into the
+# image for its bundled defaults, so the operator-filled files inside it must
+# be excluded by name -- these mirror .gitignore.
+.env
+.env.*
+!.env.example
+config/zero.yaml
+config/*secret*
+config/*secrets*
+*.secret
+**/*.secret
+
+# User data, sessions, logs and generated state.
 *.db
+**/*.db
 *.db-wal
+**/*.db-wal
 *.db-shm
+**/*.db-shm
 *.sqlite
+**/*.sqlite
 *.sqlite3
+**/*.sqlite3
 *.session
+**/*.session
 *.session-journal
+**/*.session-journal
 *.log
+**/*.log
+*.jsonl
+**/*.jsonl
 *.enc
+**/*.enc
 *.key
+**/*.key
 *.pem
+**/*.pem
+*.p12
+**/*.p12
+*.pass
+**/*.pass
 sbom.cdx.json
 tests/
 docs/
