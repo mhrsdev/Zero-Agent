@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .service import MemoryV3Item, MemoryV3Service
+from ..sqlite_tx import sqlite_txn
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ def _digest(path: Path) -> str:
 
 
 def _metadata(target: Path) -> None:
-    with sqlite3.connect(target) as db:
+    with sqlite_txn(sqlite3.connect(target)) as db:
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS memory_v3_migration_runs(
@@ -49,7 +50,7 @@ def _metadata(target: Path) -> None:
 
 
 def _source_rows(source: Path, table: str, required: set[str]) -> list[sqlite3.Row]:
-    with sqlite3.connect(source) as db:
+    with sqlite_txn(sqlite3.connect(source)) as db:
         db.row_factory = sqlite3.Row
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if table not in tables:
@@ -174,7 +175,7 @@ def apply_v1_to_v3(
     }
     rows_by_table = {table: _source_rows(source, table, spec["required"]) for table, spec in table_specs.items()}
     scanned = sum(len(rows) for rows in rows_by_table.values())
-    with sqlite3.connect(target) as db:
+    with sqlite_txn(sqlite3.connect(target)) as db:
         db.execute(
             "INSERT OR IGNORE INTO memory_v3_migration_runs(run_id,source_path,source_sha256,started_at,status,backup_path,backup_sha256) VALUES(?,?,?,?,?,?,?)",
             (run_id, str(source.resolve()), source_hash, time.time(), "dry_run" if dry_run else "running", str(backup_path) if backup_path else None, backup_sha256),
@@ -185,10 +186,10 @@ def apply_v1_to_v3(
         for row in rows:
             source_id, row_hash = str(row[source_id_key]), hashlib.sha256(repr(tuple(row)).encode()).hexdigest()
             if not dry_run and fail_after is not None and imported + reused + quarantined >= fail_after:
-                with sqlite3.connect(target) as db:
+                with sqlite_txn(sqlite3.connect(target)) as db:
                     db.execute("UPDATE memory_v3_migration_runs SET finished_at=?,status=? WHERE run_id=?", (time.time(), "interrupted", run_id))
                 raise RuntimeError("fault_injected_migration_interrupt")
-            with sqlite3.connect(target) as db:
+            with sqlite_txn(sqlite3.connect(target)) as db:
                 prior = db.execute("SELECT action FROM memory_v3_migration_map WHERE run_id=? AND source_table=? AND source_id=? AND source_sha256=?", (run_id, table, source_id, row_hash)).fetchone()
             if prior:
                 if prior[0] == "quarantine":
@@ -200,30 +201,30 @@ def apply_v1_to_v3(
                 item = _item(table, row)
             except (TypeError, ValueError) as exc:
                 quarantined += 1
-                with sqlite3.connect(target) as db:
+                with sqlite_txn(sqlite3.connect(target)) as db:
                     db.execute("INSERT OR IGNORE INTO memory_v3_quarantine(source_name,source_id,reason,created_at) VALUES(?,?,?,?)", (f"v1:{source.resolve()}", f"{table}:{source_id}", str(exc), time.time()))
                     db.execute("INSERT OR IGNORE INTO memory_v3_migration_map VALUES(?,?,?,?,?,?)", (run_id, table, source_id, row_hash, None, "quarantine"))
                 continue
             if dry_run:
                 continue
             normalized = service._norm(item.content)
-            with sqlite3.connect(target) as db:
+            with sqlite_txn(sqlite3.connect(target)) as db:
                 existing = db.execute("SELECT id FROM memory_v3_items WHERE scope=? AND chat_id IS ? AND owner_user_id IS ? AND normalized_content=? AND status='active'", (item.scope, item.chat_id, item.owner_user_id, normalized)).fetchone()
             target_id = service._put_sync(item)
             action = "reused" if existing else "inserted"
-            with sqlite3.connect(target) as db:
+            with sqlite_txn(sqlite3.connect(target)) as db:
                 db.execute("INSERT OR IGNORE INTO memory_v3_migration_map VALUES(?,?,?,?,?,?)", (run_id, table, source_id, row_hash, target_id, action))
             if action == "reused":
                 reused += 1
             else:
                 imported += 1
-    with sqlite3.connect(target) as db:
+    with sqlite_txn(sqlite3.connect(target)) as db:
         db.execute("UPDATE memory_v3_migration_runs SET finished_at=?,status=? WHERE run_id=?", (time.time(), "dry_run" if dry_run else "applied", run_id))
     return MigrationResult(run_id, scanned, imported, reused, quarantined)
 
 
 def verify_v1_to_v3(target_path: str | Path, run_id: str) -> dict[str, Any]:
-    with sqlite3.connect(target_path) as db:
+    with sqlite_txn(sqlite3.connect(target_path)) as db:
         run = db.execute("SELECT status FROM memory_v3_migration_runs WHERE run_id=?", (run_id,)).fetchone()
         mappings = db.execute("SELECT target_id,action FROM memory_v3_migration_map WHERE run_id=?", (run_id,)).fetchall()
         missing = sum(1 for target_id, action in mappings if action != "quarantine" and not db.execute("SELECT 1 FROM memory_v3_items WHERE id=?", (target_id,)).fetchone())
@@ -232,7 +233,7 @@ def verify_v1_to_v3(target_path: str | Path, run_id: str) -> dict[str, Any]:
 
 
 def rollback_v1_to_v3(target_path: str | Path, run_id: str) -> dict[str, Any]:
-    with sqlite3.connect(target_path) as db:
+    with sqlite_txn(sqlite3.connect(target_path)) as db:
         ids = [r[0] for r in db.execute("SELECT target_id FROM memory_v3_migration_map WHERE run_id=? AND action='inserted' AND target_id IS NOT NULL", (run_id,))]
         changed = 0
         for target_id in ids:

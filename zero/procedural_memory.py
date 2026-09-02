@@ -9,7 +9,10 @@ CREATE TABLE IF NOT EXISTS procedural_memory_runs(id INTEGER PRIMARY KEY AUTOINC
 CREATE INDEX IF NOT EXISTS idx_procedural_active ON procedural_memory(status,name);
 '''
 def migrate_procedural_memory(db_path:str|Path):
- with sqlite3.connect(db_path,timeout=5) as c:c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');c.executescript(SCHEMA);c.commit()
+ # sqlite_txn, not a bare `with sqlite3.connect(...)`: Connection.__exit__ only
+ # commits or rolls back, so the schema-init handle stayed open until GC and on
+ # Windows kept the database file locked.
+ with sqlite_txn(sqlite3.connect(db_path,timeout=5)) as c:c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');c.executescript(SCHEMA);c.commit()
 class ProceduralMemory:
  def __init__(self,db_path):self.db_path=Path(db_path);self.db_path.parent.mkdir(parents=True,exist_ok=True);migrate_procedural_memory(self.db_path)
  def _c(self):

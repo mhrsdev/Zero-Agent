@@ -106,7 +106,9 @@ class DeferredMemory:
     CONTINUATION_TTL = 10 * 60
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
-        with sqlite3.connect(self.db_path, timeout=5) as con:
+        # sqlite_txn closes the handle; a bare `with sqlite3.connect(...)` only
+        # commits, so this schema-init connection stayed open until GC.
+        with sqlite_txn(sqlite3.connect(self.db_path, timeout=5)) as con:
             con.execute('PRAGMA busy_timeout=5000'); con.execute('PRAGMA journal_mode=WAL'); con.execute('PRAGMA foreign_keys=ON')
             con.executescript(SCHEMA)
 
