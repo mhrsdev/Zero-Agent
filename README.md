@@ -185,8 +185,12 @@ git clone https://github.com/mhrsdev/Zero-Agent.git
 cd Zero-Agent
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
+
+`requirements.txt` is the runtime set; `requirements-dev.txt` adds the test
+framework. Runtime-only installs (Docker, both one-line installers) use the
+hash-pinned `requirements.lock` and do not ship pytest.
 
 ## Docker status — not turnkey in this release line
 
@@ -234,6 +238,9 @@ The repository configures pytest with `tests/` as its test path. The CI workflow
 ```bash
 python -m pytest -q -p no:cacheprovider
 ```
+
+Install `requirements-dev.txt` first; `requirements.txt` carries the runtime
+dependencies only.
 
 Tests with names such as `live_e2e`, `real_integration`, or external-account behavior should not be read as proof that this checkout has successfully authenticated to Telegram, called a paid provider, or delivered a live message.
 
