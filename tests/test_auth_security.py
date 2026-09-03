@@ -93,9 +93,12 @@ class TestSessionSecurity:
 class TestDefaultAdminSecurity:
     """Default admin must be forced to change password."""
 
+    def test_weak_default_admin_password_is_rejected(self, store):
+        with pytest.raises(ValueError, match="password must be at least 12"):
+            store.create_admin("admin", "Admin", must_change_password=True)
+
     def test_default_admin_must_change_password(self, store):
-        # The bootstrap path uses allow_weak for admin/Admin + must_change_password
-        admin_id = store.create_admin("admin", "Admin", must_change_password=True)
+        admin_id = store.create_admin("admin", "a_strong_password_123", must_change_password=True)
         with store._connect() as db:
             row = db.execute("SELECT must_change_password FROM panel_admins WHERE id=?", (admin_id,)).fetchone()
         assert row["must_change_password"] == 1

@@ -148,6 +148,15 @@ def test_timeout_maps_to_safe_error_and_kills_process_group(tmp_path, monkeypatc
     assert killed and killed[0][0] == 456
 
 
+def test_health_proves_unavailable_when_officecli_is_absent(tmp_path):
+    workspace = create_workspace(tmp_path, chat_id=1, job_id="health")
+    missing = tmp_path / "missing-officecli"
+    adapter = OfficeCliAdapter(config(cli_path=str(missing)), workspace)
+    report = adapter.health()
+    assert report["available"] is False
+    assert report["error_code"] == "officecli_unavailable"
+
+
 def test_nonzero_or_malformed_json_output_is_mapped_without_exposing_stderr(tmp_path, monkeypatch):
     workspace = create_workspace(tmp_path, chat_id=1, job_id="job1")
 

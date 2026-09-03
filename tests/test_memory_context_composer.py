@@ -1,6 +1,6 @@
 import pytest
 
-from zero.memory_context import compose_memory_context
+from zero.memory_context import TOTAL_BUDGET, compose_memory_context
 from zero.deferred_memory import DeferredMemory
 from zero.models import IncomingMessage
 from zero.semantic_memory import SemanticUserMemory
@@ -155,14 +155,29 @@ async def test_context_is_bounded_complete_and_deduplicates_recent(tmp_path):
         })
     message = IncomingMessage(chat_id=chat, chat_title="g", sender_id=9, sender_label="current", text="پایتون چی شد؟")
 
-    context, _ = await compose_memory_context(
+    context, meta = await compose_memory_context(
         store=store, semantic_memory=semantic, message=message,
         recent=recent, layered={"short": [], "medium": [], "long": []},
     )
 
-    assert len(context) <= 28000
-    for tag in ("CURRENT_USER_MEMORY", "RECENT_GROUP_FLOW", "RELEVANT_RECENT_MESSAGES", "ORDINARY_MEMORY", "RAG_MEMORY"):
+    # The per-block caps sum to 36,200 characters; this pins the total instead.
+    assert len(context) <= TOTAL_BUDGET
+    # Completeness is a property of the blocks that were emitted: every one of
+    # them is opened and closed exactly once, and meta names exactly those.
+    for tag in meta["blocks"]:
         assert context.count(f"[{tag}]") == context.count(f"[/{tag}]") == 1
+    assert meta["blocks"] == [tag for tag in (
+        "CURRENT_MESSAGE_IDENTITY", "CURRENT_USER_MEMORY", "REPLY_CHAIN",
+        "MULTI_PERSON_REPLY_THREAD", "TARGET_USER_MEMORY", "TARGET_IDENTITY_AMBIGUITY",
+        "RECENT_GROUP_FLOW", "RELEVANT_RECENT_MESSAGES", "GROUP_MONTHLY_SUMMARY",
+        "ORDINARY_MEMORY", "RAG_MEMORY",
+    ) if f"[{tag}]" in context]
+    for tag in ("CURRENT_MESSAGE_IDENTITY", "CURRENT_USER_MEMORY", "RECENT_GROUP_FLOW", "RELEVANT_RECENT_MESSAGES"):
+        assert tag in meta["blocks"], tag
+    # This store holds no layered or retrieved memory, so those blocks carry
+    # nothing; a header framing no record is cost without content.
+    for tag in ("ORDINARY_MEMORY", "RAG_MEMORY"):
+        assert tag not in meta["blocks"] and f"[{tag}]" not in context
     assert context.count("telegram_message_id=3 ") <= 1
 
 
@@ -200,5 +215,9 @@ async def test_rag_failure_does_not_break_context_composition(tmp_path, monkeypa
         store=store, semantic_memory=semantic, message=message,
         recent=[], layered={"short": [], "medium": [], "long": []},
     )
-    assert "[RAG_MEMORY]" in context
+    # The rest of the context still composes, and the failure is reported as its
+    # own state instead of as an empty block, which used to mean "retrieval was
+    # not asked for", "asked for and empty" and "unavailable" all at once.
+    assert "[CURRENT_MESSAGE_IDENTITY]" in context
+    assert meta["rag"] == "unavailable"
     assert meta["chars"] == len(context)

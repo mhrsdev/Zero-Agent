@@ -15,6 +15,7 @@ def test_listener_and_panel_have_no_first_group_routing():
 def test_cooldowns_are_group_scoped_in_runtime_sources():
     listener = (ROOT / "scripts" / "run_listener.py").read_text(encoding="utf-8")
     brain = (ROOT / "zero" / "brain.py").read_text(encoding="utf-8")
+    policy = (ROOT / "zero" / "brain_policy.py").read_text(encoding="utf-8")
     assert "last_starter_at:{int(chat_id)}" in listener
     assert "last_interject_at:{int(incoming.chat_id)}" in listener
-    assert "last_interject_at:{int(message.chat_id)}" in brain
+    assert "last_interject_at:{int(message.chat_id)}" in (brain + policy)

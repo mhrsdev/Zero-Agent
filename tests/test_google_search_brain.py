@@ -233,6 +233,7 @@ def test_deep_search_reaches_brain_with_report_instruction(tmp_path: Path):
 def test_deep_search_has_independent_atomic_user_limit(tmp_path: Path):
     async def scenario():
         config = build_config(tmp_path)
+        config = config.model_copy(update={'web': config.web.model_copy(update={'deep_search_user_hourly': 3, 'deep_search_owner_hourly': 12, 'deep_search_global_hourly': 30})})
         store = ZeroStore(config.memory.db_path)
         router = CapturingRouter('گزارش کوتاه')
         brain = ZeroBrain(config, store, router)

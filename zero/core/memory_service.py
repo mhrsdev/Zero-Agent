@@ -100,6 +100,15 @@ class MemoryService:
         self._guard_message(message)
         await self.backend.record_message(message, role=role)
 
+    async def forget_user(self, chat_id: int, user_id: int) -> int:
+        self._require(Permission.WRITE_MEMORY)
+        if self.scope is not None and self.registry is not None:
+            group = self.registry.get_group(self.scope.installation_id, self.scope.group_id)
+            if group.platform_chat_id is not None and int(chat_id) != int(group.platform_chat_id):
+                from ..tenancy import ScopeViolation
+                raise ScopeViolation(f"forget for chat {chat_id} does not belong to {self.scope}")
+        return await self.backend.forget_user(int(chat_id), int(user_id))
+
     async def metric(self, trace_id: str, kind: str, payload: dict[str, Any]) -> None:
         await self.backend.metric(trace_id, kind, payload)
 

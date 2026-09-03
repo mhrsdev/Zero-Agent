@@ -134,10 +134,12 @@ def test_setup_state_redacts_legacy_session_reference_values(tmp_path: Path):
 
 def test_default_admin_is_forced_to_change_password(tmp_path: Path):
     store = PanelStore(tmp_path / "panel.db")
-    store.create_admin("Admin", "Admin", must_change_password=True)
-    admin = store.verify_admin("admin", "Admin")
+    with pytest.raises(ValueError, match="password must be at least 12"):
+        store.create_admin("Admin", "Admin", must_change_password=True)
+    store.create_admin("admin", "a_strong_password_123", must_change_password=True)
+    admin = store.verify_admin("admin", "a_strong_password_123")
     assert admin and admin["must_change_password"] == 1
-    store.change_admin_password(admin["id"], "Admin", "a secure replacement password")
+    store.change_admin_password(admin["id"], "a_strong_password_123", "a secure replacement password")
     updated = store.verify_admin("admin", "a secure replacement password")
     assert updated and updated["must_change_password"] == 0
 

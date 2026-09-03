@@ -8,6 +8,7 @@ To actually run the live tests, you need:
 3. At least 2 test users in the group
 4. Environment variables set:
    - ZERO_COMMUNITY_E2E=1
+   - ZERO_LIVE_E2E=1 (Gemini/OpenRouter/Telegram getMe harness in test_live_providers_e2e.py)
    - TELEGRAM_BOT_TOKEN=<real token>
    - TELEGRAM_TEST_GROUP_ID=<real group ID>
    - TELEGRAM_TEST_USER_ID_1=<real user ID 1>

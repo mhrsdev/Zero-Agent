@@ -12,6 +12,7 @@ listener:
   allowed_group_usernames: []
   allowed_group_titles: []
   check_for_reply_to_self: true
+  flood_wait_backoff: true
 persona:
   name_en: "Zero"
   name_fa: "زیرو"
@@ -27,6 +28,8 @@ persona:
 policy:
   max_reply_sentences: 4
   max_reply_chars: 900
+  reply_profile: compact
+  think_marker: false
   spam_cooldown_seconds: 90
   user_window_seconds: 1800
   user_max_replies_per_window: 8
@@ -134,3 +137,6 @@ logs:
   listener_log: "$ZERO_HOME/logs/listener.log"
   panel_log: "$ZERO_HOME/logs/panel.log"
   router_log: "$ZERO_HOME/logs/router.log"
+debug:
+  trace_replies: false
+  log_prompts: false

@@ -41,7 +41,9 @@ CREATE INDEX IF NOT EXISTS idx_experience_audit_id ON experience_memory_audit(ex
 
 
 def migrate_experience_memory(db_path: str | Path):
-    with sqlite3.connect(db_path, timeout=5) as c:
+    # sqlite_txn closes the handle; a bare `with sqlite3.connect(...)` only
+    # commits or rolls back, leaving the schema-init connection open until GC.
+    with sqlite_txn(sqlite3.connect(db_path, timeout=5)) as c:
         c.execute('PRAGMA busy_timeout=5000'); c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA foreign_keys=ON')
         c.executescript(SCHEMA)
         candidate_cols = {r[1] for r in c.execute('PRAGMA table_info(experience_memory_candidates)')}

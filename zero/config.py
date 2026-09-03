@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -31,7 +32,7 @@ def _apply_secret_file(content: dict[str, Any], path: Path) -> None:
     sensitive = (
         content.get("listener", {}).get("telegram_api_hash"),
         content.get("telegram_search", {}).get("api_hash"),
-        *(content.get("router", {}).get("providers", {}).get(name, {}).get("keys", []) for name in ("gemini", "openrouter")),
+        *(content.get("router", {}).get("providers", {}).get(name, {}).get("keys", []) for name in ("gemini", "openrouter", "local_openai")),
     )
     has_inline = any((isinstance(value, list) and any(not _placeholder(item) for item in value)) or (isinstance(value, str) and not _placeholder(value)) for value in sensitive)
     requested = os.environ.get(_SECRET_ENV)
@@ -48,7 +49,7 @@ def _apply_secret_file(content: dict[str, Any], path: Path) -> None:
         content.setdefault("listener", {})["telegram_api_hash"] = listener_secret
     if search_secret:
         content.setdefault("telegram_search", {})["api_hash"] = search_secret
-    for provider in ("gemini", "openrouter"):
+    for provider in ("gemini", "openrouter", "local_openai"):
         keys = providers.get(provider, {}).get("keys")
         if keys is not None:
             content.setdefault("router", {}).setdefault("providers", {}).setdefault(provider, {})["keys"] = keys
@@ -58,7 +59,7 @@ def _validate_secret_values(content: dict[str, Any]) -> None:
     sensitive = (
         content.get("listener", {}).get("telegram_api_hash"),
         content.get("telegram_search", {}).get("api_hash"),
-        *(content.get("router", {}).get("providers", {}).get(name, {}).get("keys", []) for name in ("gemini", "openrouter")),
+        *(content.get("router", {}).get("providers", {}).get(name, {}).get("keys", []) for name in ("gemini", "openrouter", "local_openai")),
     )
     if any((isinstance(value, list) and any(_placeholder(item) for item in value)) or (isinstance(value, str) and value in {"__FROM_SECRET__", "__REDACTED__"}) for value in sensitive):
         raise ValueError("credential placeholder was not resolved from protected secret file")
@@ -78,6 +79,7 @@ class ListenerConfig(BaseModel):
     allowed_group_usernames: list[str] = Field(default_factory=list)
     allowed_group_titles: list[str] = Field(default_factory=list)
     check_for_reply_to_self: bool = True
+    flood_wait_backoff: bool = True
 
 
 class PersonaConfig(BaseModel):
@@ -97,6 +99,8 @@ class PersonaConfig(BaseModel):
 class PolicyConfig(BaseModel):
     max_reply_sentences: int = 4
     max_reply_chars: int = 900
+    reply_profile: str = "compact"
+    think_marker: bool = False
     spam_cooldown_seconds: int = 90
     user_window_seconds: int = 1800
     user_max_replies_per_window: int = 8
@@ -122,11 +126,13 @@ class ProviderConfig(BaseModel):
     rpm: int | None = None
     tpm: int | None = None
     rpd: int | None = None
+    base_url: str = ""
 
 
 class RouterProvidersConfig(BaseModel):
     gemini: ProviderConfig
     openrouter: ProviderConfig
+    local_openai: ProviderConfig | None = None
 
 
 class RouterConfig(BaseModel):
@@ -150,6 +156,10 @@ class MemoryConfig(BaseModel):
     long_term_limit: int = 120
     summary_trigger_messages: int = 120
     per_user_profile_limit: int = 250
+    prompt_token_budget: int = 0
+    remember_private: bool = False
+    retention_days: int = 0
+    inject_depth: str = "standard"
 
 
 class ReportingConfig(BaseModel):
@@ -170,6 +180,21 @@ class WebConfig(BaseModel):
     provider_retries: int = 1
     cache_ttl_seconds: int = 1800
     context_max_chars: int = 2500
+    # Deep-search quotas, per rolling hour. 0 means no limit.
+    #
+    # These were hardcoded in zero/brain.py as 3 per user, 12 for the owner and
+    # 30 across the whole install, so changing them meant editing the reply path.
+    # They are settings now, and the shipped default is unlimited because that is
+    # what this deployment asked for.
+    #
+    # Deep search is the most expensive operation in the system: it expands one
+    # question into four query variants, extracts up to 15 pages instead of 2,
+    # builds a 20,000-character context instead of 2,500, and answers with a
+    # 2,200-token budget instead of 700. Raise these above 0 if provider spend
+    # needs a ceiling; deep_search_global_hourly is the one that bounds total cost.
+    deep_search_user_hourly: int = 0
+    deep_search_owner_hourly: int = 0
+    deep_search_global_hourly: int = 0
 
 
 class TelegramSearchConfig(BaseModel):
@@ -406,6 +431,31 @@ class LogsConfig(BaseModel):
     router_log: str
 
 
+class DebugConfig(BaseModel):
+    trace_replies: bool = False
+    log_prompts: bool = False
+    trace_path: str = ""
+
+
+
+
+def _read_config_document(path: Path) -> dict[str, Any]:
+    """Load YAML or JSON runtime config. Same schema either way."""
+    raw = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        document = json.loads(raw)
+    elif suffix in {".yaml", ".yml"}:
+        document = yaml.safe_load(raw)
+    else:
+        try:
+            document = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            document = json.loads(raw)
+    if not isinstance(document, dict):
+        raise ValueError("config document must be a mapping")
+    return document
+
 
 def _expand_runtime_paths(content: dict[str, Any]) -> None:
     runtime_home = Path(os.environ.get("ZERO_HOME", "~/.zero")).expanduser()
@@ -440,12 +490,13 @@ class ZeroConfig(BaseModel):
     reactions: ReactionsConfig = Field(default_factory=ReactionsConfig)
     office: OfficeConfig = Field(default_factory=OfficeConfig)
     logs: LogsConfig
+    debug: DebugConfig = Field(default_factory=DebugConfig)
 
 
     @classmethod
     def load(cls, path: str | Path) -> "ZeroConfig":
         config_path = Path(path)
-        content: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        content = _read_config_document(config_path)
         _expand_runtime_paths(content)
         default_secret = config_path.resolve().parents[1] / "runtime" / "secrets" / "zero.secrets.yaml"
         secret_path = Path(os.environ.get(_SECRET_ENV, str(default_secret)))

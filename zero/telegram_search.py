@@ -285,7 +285,13 @@ class WebTelegramDiscoveryProvider(_Provider):
 class TelegramSearchConversationState:
     def __init__(self, ttl_seconds=300, store=None): self.ttl=ttl_seconds; self.store=store; self._data={}
     def _key(self,r): return (int(r.chat_id),int(r.sender_id),r.thread_id,r.reply_to_message_id)
-    def save(self,r): self._data[self._key(r)]=(time.time(),r); logger.info("TG_SEARCH_STATE_SAVED trace_id=%s chat_id=%s sender_id=%s reason=memory_fallback",r.trace_id,r.chat_id,r.sender_id)
+    def _prune(self,now):
+        # The TTL used to be applied only to keys that were looked up again.
+        # Most search states are never revisited, so they survived for the
+        # lifetime of the listener. Sweep on write, like web_search.state does.
+        for key,(saved_at,_) in list(self._data.items()):
+            if now-saved_at>self.ttl: self._data.pop(key,None)
+    def save(self,r): now=time.time(); self._prune(now); self._data[self._key(r)]=(now,r); logger.info("TG_SEARCH_STATE_SAVED trace_id=%s chat_id=%s sender_id=%s reason=memory_fallback",r.trace_id,r.chat_id,r.sender_id)
     def get(self,r):
         item=self._data.get(self._key(r))
         if not item or time.time()-item[0]>self.ttl:

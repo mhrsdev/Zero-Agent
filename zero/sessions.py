@@ -287,7 +287,11 @@ class TelethonLoginAdapter:
             return LoginOutcome("network_error")
         finally:
             try:
-                await client.disconnect()
+                # Shielded: a cancellation delivered while this teardown runs
+                # would otherwise raise out of the await immediately and leave
+                # the Telethon session half-open, which on Windows keeps the
+                # session file locked.
+                await asyncio.shield(client.disconnect())
             finally:
                 SessionRegistry._secure_session_files(session_path)
 

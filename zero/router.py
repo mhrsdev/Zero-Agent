@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from .config import ProviderConfig, ZeroConfig
 from .logging_utils import setup_logger
 from .models import RouteResult
+from .providers.transport import post_json
 
 
 RATE_LIMIT_ERRORS = {"PER_KEY_AUTH_ERROR", "PER_MODEL_RATE_LIMIT", "PROJECT_QUOTA_EXHAUSTED", "PROVIDER_CAPACITY", "DAILY_LIMIT", "MINUTE_LIMIT", "TOKEN_LIMIT", "UNKNOWN_RATE_LIMIT"}
@@ -131,9 +132,7 @@ class IndependentRouter:
         payload: dict[str, Any] = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"temperature": .45, "maxOutputTokens": max_output_tokens}}
         if search: payload["tools"] = [{"google_search": {}}]
         elif tools: payload["tools"] = [{"function_declarations": tools}]
-        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.config.router.request_timeout_seconds) as response:
-            data = json.loads(response.read().decode())
+        data = post_json(url, payload, {"Content-Type": "application/json"}, self.config.router.request_timeout_seconds)
         text = "".join(p.get("text", "") for p in data.get("candidates", [{}])[0].get("content", {}).get("parts", [])).strip()
         return text, data
 
@@ -142,9 +141,17 @@ class IndependentRouter:
         if tools:
             payload["tools"] = [{"type": "function", "function": tool} for tool in tools]
             payload["tool_choice"] = "auto"
-        req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}", "HTTP-Referer": "https://zero.local/", "X-Title": "Zero"})
-        with urllib.request.urlopen(req, timeout=self.config.router.request_timeout_seconds) as response:
-            data = json.loads(response.read().decode())
+        data = post_json(
+            "https://openrouter.ai/api/v1/chat/completions",
+            payload,
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+                "HTTP-Referer": "https://zero.local/",
+                "X-Title": "Zero",
+            },
+            self.config.router.request_timeout_seconds,
+        )
         return (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip(), data
 
     async def _complete_provider(self, provider: str, prompt: str, max_output_tokens: int, *, model: str | None = None, search: bool = False, tools: list[dict[str, Any]] | None = None) -> RouteResult:
@@ -181,13 +188,20 @@ class IndependentRouter:
 
     async def complete(self, prompt: str, *, max_output_tokens: int = 700) -> RouteResult:
         # If a ProviderRegistry is wired in and has profiles, delegate to it.
-        if self.registry is not None and self.registry.names():
+        legacy = str(os.getenv("ZERO_ROUTER_LEGACY", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if (not legacy) and self.registry is not None and self.registry.names():
             try:
                 from .providers.base import CompletionRequest
                 req = CompletionRequest(prompt=prompt, max_output_tokens=max_output_tokens)
-                profiles = self.registry.names()
-                primary = profiles[0]
-                fallback = tuple(profiles[1:])
+                names = list(self.registry.names())
+                name_set = set(names)
+                config = getattr(self, "config", None)
+                router_cfg = getattr(config, "router", None) if config is not None else None
+                turn = getattr(self, "turn_profile", None)
+                preferred = turn if turn in name_set else getattr(router_cfg, "normal_primary", None)
+                primary = preferred if preferred in name_set else names[0]
+                ordered = [getattr(router_cfg, "normal_fallback", None), *names]
+                fallback = tuple(name for name in ordered if name in name_set and name != primary)
                 result = await self.registry.complete(req, profile=primary, fallback=fallback)
                 self.last_route = {"provider": result.profile, "model": result.model, "registry": True}
                 return RouteResult(
@@ -195,7 +209,9 @@ class IndependentRouter:
                     attempts=result.attempts, metadata={**result.metadata, "registry": True},
                 )
             except Exception as exc:
-                self.logger.warning("REGISTRY_FALLBACK error=%s", type(exc).__name__)
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.warning("REGISTRY_FALLBACK error=%s", type(exc).__name__)
                 # Fall through to legacy pools
 
         configured = [self.config.router.normal_primary, self.config.router.normal_fallback]

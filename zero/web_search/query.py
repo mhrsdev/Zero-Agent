@@ -22,6 +22,25 @@ _GENERIC = {
     'حتما', 'حتماً', 'امروز', 'الان', 'جدید', 'اینترنت', 'پیدا', 'خب', 'خوب', 'حالا', 'پس', 'دوباره', 'بگو', 'please', 'search', 'find', 'lookup', 'zero', 'زیرو',
 }
 _DOMAIN_RE = re.compile(r'(?<![\w-])(?:https?://)?([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9-]+)+)')
+# Trailing labels that make a dotted token a file or a library name, not a host.
+# `_DOMAIN_RE` matches any `word.word`, so without this every `.js` technology
+# became a `site:` filter AND was stripped out of the topic: "best node.js
+# framework 2026" was rewritten to "best framework 2026 site:node.js", which
+# cannot match anything and no longer mentions what the user asked about.
+# A few of these (py, md, rs, go, sh) are real ccTLDs; excluding them costs a
+# site-filter on a rare query and buys back every query about a library.
+_NOT_A_HOST_SUFFIX = frozenset({
+    'js', 'mjs', 'cjs', 'jsx', 'tsx', 'py', 'rb', 'rs', 'go', 'sh', 'ps1',
+    'json', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'md', 'txt', 'log',
+    'lock', 'env', 'sql', 'csv', 'tsv', 'xml', 'html', 'css', 'scss', 'php',
+    'java', 'kt', 'cpp', 'hpp', 'cs', 'exe', 'dll', 'zip', 'tar', 'gz',
+})
+_EXPLICIT_SITE_RE = re.compile(r'(?<![\w-])site:\s*([a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})', re.I)
+# Words a news query is *about* nothing when they are all that is left.
+_NEWS_FILLER = frozenset({
+    'خبر', 'اخبار', 'آخر', 'آخرین', 'چیا', 'چی', 'هست', 'است', 'مهم', 'جدید', 'روز',
+    'news', 'latest', 'verified',
+})
 _URL_RE = re.compile(r'https?://[^\s<>\[\]()]+', re.I)
 _LINK_REQUEST_RE = re.compile(
     r'(?:لینک|صفحه|پست|مقاله).{0,32}(?:باز|بخون|بررسی|تحلیل|چک|ببین)|'
@@ -85,6 +104,10 @@ class QueryRewriter:
                         query = self._semantic_rewrite(candidate)
                         break
             query = re.sub(r'\s+site:\S+', '', query).strip()
+            # A query that is nothing but the domain would become
+            # "digikala.com site:digikala.com"; the filter alone says it.
+            if query.lower().removeprefix('www.') == preferred_domain:
+                query = ''
             query = f'{query} site:{preferred_domain}'.strip()
 
         language = 'fa' if re.search(r'[\u0600-\u06FF]', query) else 'en'
@@ -103,8 +126,11 @@ class QueryRewriter:
         return tuple(replace(plan, query=query[:240]) for query in variants if query)
 
     def _preferred_domain(self, text: str) -> str:
+        explicit = _EXPLICIT_SITE_RE.search(text or '')
+        if explicit:
+            return explicit.group(1).lower().removeprefix('www.')
         match = _DOMAIN_RE.search(text)
-        if match:
+        if match and not _is_not_a_host(match.group(1)):
             return match.group(1).lower().removeprefix('www.')
         for alias, domain in _SITE_ALIASES.items():
             if re.search(rf'(?:از|تو|در)\s+{re.escape(alias)}\b', text) or f'{alias} ببین' in text:
@@ -130,16 +156,27 @@ class QueryRewriter:
         low = _normalize(text).replace('رومیت', 'زومیت')
         low = re.sub(r'(?<![\w\u0600-\u06FF])کیمی(?![\w\u0600-\u06FF])', 'کیمی Kimi', low)
         if ('openai' in low) and any(x in low for x in ('آخرین خبر', 'اخرین خبر', 'خبر', 'اخبار', 'latest', 'جدید')):
-            return 'Latest OpenAI news'
+            # "Latest OpenAI news" plus whatever else the user named. Returning
+            # the bare constant deleted the actual subject: "latest verified
+            # OpenAI GPT-5 official release research news" became just "Latest
+            # OpenAI news", so every OpenAI topic collapsed to one query — and,
+            # because the query is the cache key, to one cache entry.
+            extra = [t for t in _terms(low) if t not in _NEWS_FILLER and t != 'openai']
+            return ' '.join(('Latest OpenAI news', *dict.fromkeys(extra))).strip()
         if 'خبر' in low or 'اخبار' in low or 'news' in low:
             if 'زومیت' in low and 'چیاست' in low and not re.search(r'\d|[۰-۹]', low):
                 return low
-            news_terms = [t.rstrip('؟،؛,.') for t in _terms(low) if t.rstrip('؟،؛,.') not in {'خبر', 'اخبار', 'آخر', 'آخرین', 'چیا', 'چی', 'هست', 'است', 'مهم', 'جدید', 'روز'} and not t.rstrip('؟،؛,.').isdigit()]
-            return 'آخرین اخبار ' + ' '.join(dict.fromkeys(news_terms)) if news_terms else 'آخرین اخبار'
+            news_terms = [t.rstrip('؟،؛,.') for t in _terms(low) if t.rstrip('؟،؛,.') not in _NEWS_FILLER and not t.rstrip('؟،؛,.').isdigit()]
+            subject = ' '.join(dict.fromkeys(news_terms))
+            # The prefix follows the subject's own script. A Persian prefix on an
+            # English subject also set plan.language='fa', and the ranker
+            # down-weights results whose language does not match — so an English
+            # news query was penalised for the words this function added.
+            if subject and not re.search(r'[\u0600-\u06FF]', subject):
+                return f'latest news {subject}'
+            return f'آخرین اخبار {subject}' if subject else 'آخرین اخبار'
         if re.search(r'\brtx\s+spark\b', low, flags=re.I):
             return 'NVIDIA RTX Spark'
-        if ('openai' in low) and any(x in low for x in ('آخرین خبر', 'اخرین خبر', 'latest', 'جدید')):
-            return 'Latest OpenAI news'
         if ('عیار' in low or re.search(r'\bkarat\b|\bcarat\b', low)) and any(x in low for x in ('قیمت', 'نرخ', 'چنده', 'price')):
             karat = '۲۴' if re.search(r'(?:^|\D)(?:24|۲۴)(?:\s*عیار|\s*(?:karat|carat))', low) else '۱۸'
             return f'قیمت طلای {karat} عیار امروز ایران'
@@ -160,6 +197,11 @@ class QueryRewriter:
         return cleaned or low
 
 
+def _is_not_a_host(token: str) -> bool:
+    """Whether a dotted token is a file or library name rather than a hostname."""
+    return token.rsplit('.', 1)[-1].lower() in _NOT_A_HOST_SUFFIX
+
+
 def _normalize(text: str) -> str:
     text = (text or '').lower().replace('ي', 'ی').replace('ك', 'ک')
     text = re.sub(r'@[\w_]+|[#*_`~|>\[\](){}<>"“”«»]', ' ', text)
@@ -168,6 +210,11 @@ def _normalize(text: str) -> str:
 
 def _terms(text: str) -> list[str]:
     text = _normalize(text)
-    text = _DOMAIN_RE.sub(' ', text)
+    # An explicit `site:example.com` is an operator, not a term. Stripping the
+    # domain alone left the bare word `site` behind, so `site:t.me zero agent`
+    # — the exact string zero/telegram_search.py sends — became the query
+    # `site agent site:t.me`.
+    text = _EXPLICIT_SITE_RE.sub(' ', text)
+    text = _DOMAIN_RE.sub(lambda m: ' ' if not _is_not_a_host(m.group(1)) else m.group(0), text)
     parts = re.findall(r'[A-Za-z0-9_+-]+|[\u0600-\u06FF]+', text)
     return [part for part in parts if part.lower() not in _GENERIC]

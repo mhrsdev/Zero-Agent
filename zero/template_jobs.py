@@ -34,6 +34,11 @@ OWNER_CAPABILITIES = frozenset({
 ADMIN_CAPABILITIES = frozenset({'cron.create', 'cron.delete', 'cron.pause', 'cron.resume', 'cron.logs', 'cron.metrics', 'cron.templates'})
 SAFE_CAPABILITIES = frozenset({'cron.create', 'cron.pause', 'cron.resume', 'cron.logs', 'cron.metrics'})
 FORBIDDEN_REQUEST = re.compile(r'\b(?:python|shell|bash|zsh|sh\b|script|subprocess|exec|eval|docker|podman|firecracker|runner|pip|npm|apt|curl|wget)\b|(?:کد|اسکریپت|شل|بش|پایتون|داکر|رانر|اجرا)', re.I)
+# Fallback retry delay for a job whose own schedule cannot be recomputed. Any
+# value keeps the coordinator loop from re-selecting the same failing job every
+# tick; 15 minutes is long enough to be visible in the logs and short enough
+# that a transient provider outage still recovers unattended.
+_FAILURE_BACKOFF_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -392,7 +397,7 @@ class TemplateJobService:
         if template in {'ai_news', 'daily_news', 'war_news', 'search_digest'}:
             if self.web is None:
                 return f"📰 {TEMPLATE_REGISTRY[template].title}: provider داخلی برای این اجرا پیکربندی نشده است."
-            hits = await asyncio.to_thread(self.web.search, inputs.get('query', 'latest news'))
+            hits = await self.web.search_hits(inputs.get('query', 'latest news'))
             if not hits:
                 return '' if inputs.get('only_new') else f"📰 {TEMPLATE_REGISTRY[template].title}: خبر معتبری پیدا نشد."
             summary = '\n'.join(f'• {hit.title[:170]}' for hit in hits[:5])
@@ -446,11 +451,47 @@ class TemplateJobService:
                     delivered.append({'chat_id':job['chat_id'], 'text':result, 'run_id':run_id})
             except Exception as exc:
                 finished = _now()
+                # A failed run must still move the job off its due slot.
+                # Previously only cron_runs was updated, so next_run_at stayed
+                # <= now and the 30s coordinator loop re-selected the same job
+                # forever -- re-delivering the digest to the group on every tick
+                # whenever the failure happened after deliver() succeeded.
+                retry_at = self._retry_after_failure(job, now, finished)
                 async with self.store._lock:
                     with sqlite_txn(self.store._conn()) as conn:
-                        conn.execute("UPDATE cron_runs SET state='failed',finished_at=?,exit_code=1,exception_type=? WHERE run_id=?",(finished,type(exc).__name__,run_id)); conn.commit()
+                        if retry_at is None:
+                            conn.execute("UPDATE cron_jobs SET state='failed',last_run_at=?,next_run_at=NULL,updated_at=? WHERE job_id=?",(finished,finished,job['job_id']))
+                        else:
+                            conn.execute('UPDATE cron_jobs SET last_run_at=?,next_run_at=?,updated_at=? WHERE job_id=?',(finished,retry_at,finished,job['job_id']))
+                        conn.execute("UPDATE cron_runs SET state='failed',finished_at=?,exit_code=1,exception_type=? WHERE run_id=?",(finished,type(exc).__name__,run_id))
+                        conn.execute('INSERT INTO cron_metrics(job_id,run_count,success_count,failure_count,total_duration_ms,last_duration_ms,updated_at) VALUES (?,1,0,1,0,0,?) ON CONFLICT(job_id) DO UPDATE SET run_count=run_count+1,failure_count=failure_count+1,updated_at=excluded.updated_at',(job['job_id'],finished)); conn.commit()
                 await self._audit(self.config.owner_user_id, 'JOB_RUN_FAILED', 'run', run_id, {'exception':type(exc).__name__}, trace)
+            finally:
+                # Pending trending selections were popped only on the success
+                # path, so every failure leaked one entry for the process
+                # lifetime.
+                self._github_pending.pop(str(job['job_id']), None)
+                self._github_pending.pop(str(job.get('job_id', '-')), None)
         return delivered
+
+    def _retry_after_failure(self, job: dict[str, Any], now: int, finished: int) -> int | None:
+        """Next attempt time for a job whose run raised, or None to stop it.
+
+        A one-shot job is never retried: it is marked failed and left for the
+        owner. A recurring job resumes on its own cadence, and an unparseable or
+        rejected schedule falls back to a fixed backoff so a malformed job
+        cannot spin the coordinator loop.
+        """
+        try:
+            schedule = json.loads(job['schedule_json'])
+        except (TypeError, ValueError, KeyError):
+            return finished + _FAILURE_BACKOFF_SECONDS
+        if schedule.get('kind') == 'once':
+            return None
+        try:
+            return _next_run(schedule, max(now, int(job['next_run_at'] or now)))
+        except (JobSecurityError, ValueError, TypeError, KeyError):
+            return finished + _FAILURE_BACKOFF_SECONDS
 
     async def logs(self, job_id: str, limit: int = 10, actor: int | None = None) -> list[dict[str, Any]]:
         if actor is not None:

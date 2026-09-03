@@ -9,7 +9,10 @@ from .base import SearchProvider
 
 class TavilyProvider(SearchProvider):
     name = "tavily"
-    priority = 5
+    # Distinct from WigoloProvider's tier on purpose: sharing one priority put
+    # both in the same group, so a paid Tavily call was made on every search
+    # even when the self-hosted provider had already answered.
+    priority = 6
     api_url = "https://api.tavily.com/search"
 
     def __init__(self, api_key: str, transport, max_results: int = 5, timeout: float = 12.0):
@@ -39,7 +42,8 @@ class TavilyProvider(SearchProvider):
         )
         data = json.loads(raw)
         results: list[SearchResult] = []
-        for item in data.get("results", []):
+        # See searxng.py: a null `results` must read as empty, not raise.
+        for item in (data.get("results") or []):
             target = str(item.get("url") or "").strip()
             title = str(item.get("title") or "").strip()
             if not target or not title:
@@ -49,6 +53,10 @@ class TavilyProvider(SearchProvider):
                 url=target,
                 snippet=str(item.get("content") or "")[:1000],
                 publisher=urlsplit(target).netloc.lower().removeprefix("www.")[:120],
+                # Tavily reports this and it was dropped, so every Tavily result
+                # scored the constant "unknown age" freshness and the news
+                # fallback always printed that the publication date was unclear.
+                published_at=str(item.get("published_date") or "")[:40],
                 provider=self.name,
                 metadata={"tavily_score": item.get("score")},
             ))

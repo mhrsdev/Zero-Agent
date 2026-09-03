@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from zero.market_prices import NavasanPriceClient, PriceAPIError
 from zero.paths import zero_home
+from zero.sqlite_tx import sqlite_txn
 
 DB = zero_home() / "state" / "zero.db"
 ASSETS = {'18ayar': 'طلای ۱۸ عیار', 'sekkeh': 'سکه امامی'}
@@ -34,7 +35,7 @@ async def main() -> None:
     if not prices:
         raise PriceAPIError(f'هیچ نرخ طلایی از Navasan معتبر دریافت نشد: {failed}')
     now = int(time.time())
-    with sqlite3.connect(DB, timeout=60) as conn:
+    with sqlite_txn(sqlite3.connect(DB, timeout=60)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA busy_timeout=60000')
         conn.execute('BEGIN IMMEDIATE')

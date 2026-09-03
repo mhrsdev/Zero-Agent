@@ -99,6 +99,11 @@ CREATE TABLE IF NOT EXISTS identity_history(
 #: Settings a group owns independently of every other group.
 GROUP_SETTING_KEYS = frozenset({
     "persona", "provider_profile", "tool_policy", "web_search_enabled", "memory_enabled",
+    "enabled", "reply_mode", "language", "quiet_hours", "reply_profile",
+    "automation_reactions", "automation_interject", "automation_proactive",
+    "automation_stickers", "automation_gifs", "observe_only",
+    "memory_retention_days", "memory_inject_depth", "office_enabled", "custom_style",
+    "max_replies_per_hour", "daily_budget_usd", "forum_topics",
 })
 
 QUOTA_PERIODS = ("hour", "day", "week", "month")
@@ -139,6 +144,7 @@ class TenancyRegistry:
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn

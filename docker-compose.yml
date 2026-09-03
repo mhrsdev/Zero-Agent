@@ -66,6 +66,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The image-level HEALTHCHECK polls the panel's /api/health. The listener
+    # process serves no HTTP endpoint, so inheriting that probe would report
+    # this container as permanently unhealthy. Disable it rather than leave a
+    # health status that never turns green.
+    healthcheck:
+      disable: true
     stop_grace_period: 30s
 
 volumes:

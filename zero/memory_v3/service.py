@@ -9,10 +9,12 @@ import sqlite3
 import time
 import uuid
 import unicodedata
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from ..db_executor import AsyncMutex, SqliteWorker, submit_awaitable
 from ..paths import zero_home_path
 
 _TERMS = re.compile(r"[\wآ-ی‌]{3,}")
@@ -101,6 +103,15 @@ class MemoryV3Service:
             self._migrate()
         except (OSError, sqlite3.DatabaseError):
             self.healthy = False
+        # Every call used to open its own connection and re-issue three PRAGMAs:
+        # ~1.3 ms of setup against ~6 us of query, four times per inbound message
+        # (record_message, context, observe's record, metric). One worker thread
+        # owns one connection for the process lifetime; the async mutex keeps the
+        # FIFO ordering the read-modify-write paths (`_put`, session state)
+        # depend on. `_conn` still hands out a fresh caller-owned connection.
+        self._worker = SqliteWorker(self._conn, name=f'zero-memory-v3-{self.path.name}')
+        self._mutex = AsyncMutex()
+        self._finalizer = weakref.finalize(self, self._worker.close)
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -109,6 +120,17 @@ class MemoryV3Service:
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
+
+    def _run(self, operation: Callable[[sqlite3.Connection], Any]) -> Any:
+        """Blocking submit, for the synchronous entry points and the migrations."""
+        return self._worker.run(operation)
+
+    def _submit(self, operation: Callable[[sqlite3.Connection], Any]):
+        """Await *operation(conn)* on the sqlite thread while holding the mutex."""
+        return submit_awaitable(self._worker, self._mutex, operation)
+
+    def close(self) -> None:
+        self._worker.close()
 
     def _migrate(self) -> None:
         with sqlite_txn(self._conn()) as conn:
@@ -199,24 +221,33 @@ class MemoryV3Service:
         return " ".join((text or "").casefold().split())
 
     def _put_sync(self, item: MemoryV3Item) -> str:
+        """Synchronous insert. Kept as an entry point: the migration tooling and
+        the V1-to-V3 contract test call it directly from a non-worker thread."""
+        return self._run(lambda conn: self._put(conn, self._as_item(item)))
+
+    @staticmethod
+    def _as_item(item: Any) -> MemoryV3Item:
         # Migration tooling may adapt legacy records before they reach this store.
-        if not isinstance(item, MemoryV3Item):
-            legacy_scope = str(getattr(item, "scope", ""))
-            scope = "personal" if legacy_scope in {"group_user", "private_user"} else "group" if legacy_scope == "group" else "system"
-            item = MemoryV3Item(
-                content=str(getattr(item, "content", "")), scope=scope,
-                chat_id=getattr(item, "chat_id", None),
-                owner_user_id=getattr(item, "user_id", None) if scope == "personal" else None,
-                subject_user_id=getattr(item, "user_id", None),
-                kind=str(getattr(item, "memory_type", "fact")),
-                importance=float(getattr(item, "importance", .5)),
-                confidence=float(getattr(item, "confidence", .7)),
-                source_message_ids=tuple(getattr(item, "source_message_ids", ()) or ()),
-                metadata={"legacy_scope": legacy_scope, **(getattr(item, "metadata", None) or {})},
-                legacy_id=getattr(item, "id", None) or None,
-                created_at=float(getattr(item, "created_at", 0) or 0),
-                expires_at=getattr(item, "expires_at", None),
-            )
+        if isinstance(item, MemoryV3Item):
+            return item
+        legacy_scope = str(getattr(item, "scope", ""))
+        scope = "personal" if legacy_scope in {"group_user", "private_user"} else "group" if legacy_scope == "group" else "system"
+        return MemoryV3Item(
+            content=str(getattr(item, "content", "")), scope=scope,
+            chat_id=getattr(item, "chat_id", None),
+            owner_user_id=getattr(item, "user_id", None) if scope == "personal" else None,
+            subject_user_id=getattr(item, "user_id", None),
+            kind=str(getattr(item, "memory_type", "fact")),
+            importance=float(getattr(item, "importance", .5)),
+            confidence=float(getattr(item, "confidence", .7)),
+            source_message_ids=tuple(getattr(item, "source_message_ids", ()) or ()),
+            metadata={"legacy_scope": legacy_scope, **(getattr(item, "metadata", None) or {})},
+            legacy_id=getattr(item, "id", None) or None,
+            created_at=float(getattr(item, "created_at", 0) or 0),
+            expires_at=getattr(item, "expires_at", None),
+        )
+
+    def _put(self, conn: sqlite3.Connection, item: MemoryV3Item) -> str:
         content = self.sanitize(item.content)
         if not content or item.scope not in {"personal", "group", "system"}:
             raise ValueError("invalid_v3_memory_item")
@@ -226,46 +257,47 @@ class MemoryV3Service:
             raise ValueError("group_memory_requires_chat")
         now = time.time()
         normalized = self._norm(content)
-        with sqlite_txn(self._conn()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                duplicate = conn.execute(
-                    """SELECT id FROM memory_v3_items
-                       WHERE scope=? AND chat_id IS ? AND owner_user_id IS ?
-                         AND normalized_content=? AND status='active'""",
-                    (item.scope, item.chat_id, item.owner_user_id, normalized),
-                ).fetchone()
-                if duplicate:
-                    conn.execute("UPDATE memory_v3_items SET updated_at=? WHERE id=?", (now, duplicate["id"]))
-                    conn.execute("COMMIT")
-                    return str(duplicate["id"])
-                item_id = str(uuid.uuid4())
-                conn.execute(
-                    """INSERT INTO memory_v3_items(
-                        id,legacy_id,scope,chat_id,owner_user_id,subject_user_id,kind,content,
-                        normalized_content,importance,confidence,source_message_ids_json,metadata_json,
-                        created_at,updated_at,expires_at,status
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')""",
-                    (
-                        item_id, item.legacy_id, item.scope, item.chat_id, item.owner_user_id,
-                        item.subject_user_id, item.kind, content, normalized,
-                        max(0.0, min(1.0, item.importance)), max(0.0, min(1.0, item.confidence)),
-                        json.dumps(list(item.source_message_ids)), json.dumps(item.metadata or {}, ensure_ascii=False),
-                        item.created_at or now, now, item.expires_at,
-                    ),
-                )
-                conn.execute("INSERT INTO memory_v3_fts(id,content) VALUES(?,?)", (item_id, content))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            duplicate = conn.execute(
+                """SELECT id FROM memory_v3_items
+                   WHERE scope=? AND chat_id IS ? AND owner_user_id IS ?
+                     AND normalized_content=? AND status='active'""",
+                (item.scope, item.chat_id, item.owner_user_id, normalized),
+            ).fetchone()
+            if duplicate:
+                conn.execute("UPDATE memory_v3_items SET updated_at=? WHERE id=?", (now, duplicate["id"]))
                 conn.execute("COMMIT")
-                return item_id
-            except Exception:
-                conn.execute("ROLLBACK")
-                raise
+                return str(duplicate["id"])
+            item_id = str(uuid.uuid4())
+            conn.execute(
+                """INSERT INTO memory_v3_items(
+                    id,legacy_id,scope,chat_id,owner_user_id,subject_user_id,kind,content,
+                    normalized_content,importance,confidence,source_message_ids_json,metadata_json,
+                    created_at,updated_at,expires_at,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'active')""",
+                (
+                    item_id, item.legacy_id, item.scope, item.chat_id, item.owner_user_id,
+                    item.subject_user_id, item.kind, content, normalized,
+                    max(0.0, min(1.0, item.importance)), max(0.0, min(1.0, item.confidence)),
+                    json.dumps(list(item.source_message_ids)), json.dumps(item.metadata or {}, ensure_ascii=False),
+                    item.created_at or now, now, item.expires_at,
+                ),
+            )
+            conn.execute("INSERT INTO memory_v3_fts(id,content) VALUES(?,?)", (item_id, content))
+            conn.execute("COMMIT")
+            return item_id
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
     async def put(self, item: MemoryV3Item) -> str:
-        return await asyncio.to_thread(self._put_sync, item)
+        prepared = self._as_item(item)
+        return await self._submit(lambda conn: self._put(conn, prepared))
 
-    def _context_sync(
+    def _context(
         self,
+        conn: sqlite3.Connection,
         message: Any,
         target_user_ids: tuple[int, ...] = (),
         identity_lookup: bool = False,
@@ -280,15 +312,14 @@ class MemoryV3Service:
         group_recall = not identity_lookup and bool(_GROUP_RECALL.search(message.text or ""))
         now = time.time()
         placeholders = ",".join("?" for _ in owner_ids) or "NULL"
-        with sqlite_txn(self._conn()) as conn:
-            rows = conn.execute(
-                f"""SELECT * FROM memory_v3_items
-                    WHERE status='active' AND (expires_at IS NULL OR expires_at>?)
-                      AND ((scope='group' AND chat_id=?)
-                        OR (scope='personal' AND chat_id=? AND owner_user_id IN ({placeholders})))
-                    ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT ?""",
-                (now, chat_id, chat_id, *owner_ids, self.max_items * 4),
-            ).fetchall()
+        rows = conn.execute(
+            f"""SELECT * FROM memory_v3_items
+                WHERE status='active' AND (expires_at IS NULL OR expires_at>?)
+                  AND ((scope='group' AND chat_id=?)
+                    OR (scope='personal' AND chat_id=? AND owner_user_id IN ({placeholders})))
+                ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT ?""",
+            (now, chat_id, chat_id, *owner_ids, self.max_items * 4),
+        ).fetchall()
         selected: list[sqlite3.Row] = []
         for row in rows:
             row_terms = _content_terms(row["content"])
@@ -323,9 +354,6 @@ class MemoryV3Service:
             "group_selected": counts["group"], "target_user_ids": owner_ids,
         })
 
-    def _search_sync(self, message: Any, target_user_ids: tuple[int, ...] = (), identity_lookup: bool = False) -> tuple[str, dict[str, Any]]:
-        return self._context_sync(message, target_user_ids, identity_lookup)
-
     async def context(
         self,
         message: Any,
@@ -339,7 +367,7 @@ class MemoryV3Service:
         explicit_target = int(target_user_id) if target_user_id is not None else None
         targets = target_user_ids or ((explicit_target,) if explicit_target is not None and explicit_target != sender_id else ())
         try:
-            return await asyncio.to_thread(self._search_sync, message, targets, identity_lookup)
+            return await self._submit(lambda conn: self._context(conn, message, targets, identity_lookup))
         except Exception:
             return "", {"selected": 0, "tokens": 0, "error": "search_failed", "personal_selected": 0, "group_selected": 0}
 
@@ -378,77 +406,71 @@ class MemoryV3Service:
             await self.update_session_state(message, patch={"user_goal": goal.group(1)})
 
     async def session_state(self, message: Any, session_id: str = "root") -> dict[str, Any]:
-        def load() -> dict[str, Any]:
-            with sqlite_txn(self._conn()) as conn:
-                row = conn.execute("SELECT state_json,version FROM memory_v3_sessions WHERE chat_id=? AND user_id=? AND session_id=? AND (expires_at IS NULL OR expires_at>?)", (int(message.chat_id), int(message.sender_id), session_id, time.time())).fetchone()
+        def load(conn: sqlite3.Connection) -> dict[str, Any]:
+            row = conn.execute("SELECT state_json,version FROM memory_v3_sessions WHERE chat_id=? AND user_id=? AND session_id=? AND (expires_at IS NULL OR expires_at>?)", (int(message.chat_id), int(message.sender_id), session_id, time.time())).fetchone()
             if not row:
                 return self._empty_session()
             state = json.loads(row["state_json"])
             state["version"] = row["version"]
             return state
-        return await asyncio.to_thread(load)
+        return await self._submit(load)
 
     async def update_session_state(self, message: Any, *, session_id: str = "root", patch: dict[str, Any] | None = None, ttl_seconds: int = 86400, expected_version: int | None = None) -> dict[str, Any]:
         allowed = {"active_topic", "user_goal", "confirmed_facts", "decisions", "constraints", "unresolved_questions", "completed_actions", "pending_actions", "referenced_entities", "files_or_resources"}
         patch = patch or {}
-        def save() -> dict[str, Any]:
-            with sqlite_txn(self._conn()) as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    row = conn.execute("SELECT state_json,version FROM memory_v3_sessions WHERE chat_id=? AND user_id=? AND session_id=?", (int(message.chat_id), int(message.sender_id), session_id)).fetchone()
-                    state = json.loads(row["state_json"]) if row else self._empty_session()
-                    version = int(row["version"]) if row else 0
-                    if expected_version is not None and expected_version != version:
-                        conn.execute("ROLLBACK")
-                        return {"changed": False, "conflict": True, "version": version}
-                    changed = False
-                    for key, value in patch.items():
-                        if key not in allowed or value is None:
-                            continue
-                        if isinstance(value, list):
-                            value = [self.sanitize(str(item))[:300] for item in value]
-                            value = [item for item in value if item][:12]
-                        else:
-                            value = self.sanitize(str(value))[:500]
-                        if value and state.get(key) != value:
-                            state[key] = value
-                            changed = True
-                    if not changed:
-                        conn.execute("ROLLBACK")
-                        return {"changed": False, "conflict": False, "version": version}
-                    version += 1
-                    state["version"] = version
-                    state["last_updated_turn"] = int(state.get("last_updated_turn") or 0) + 1
-                    state["updated_at"] = int(time.time())
-                    conn.execute("INSERT INTO memory_v3_sessions(chat_id,user_id,session_id,state_json,version,updated_at,expires_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id,user_id,session_id) DO UPDATE SET state_json=excluded.state_json,version=excluded.version,updated_at=excluded.updated_at,expires_at=excluded.expires_at", (int(message.chat_id), int(message.sender_id), session_id, json.dumps(state, ensure_ascii=False), version, time.time(), time.time() + ttl_seconds))
-                    conn.execute("COMMIT")
-                    return {"changed": True, "conflict": False, "version": version}
-                except Exception:
+        def save(conn: sqlite3.Connection) -> dict[str, Any]:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT state_json,version FROM memory_v3_sessions WHERE chat_id=? AND user_id=? AND session_id=?", (int(message.chat_id), int(message.sender_id), session_id)).fetchone()
+                state = json.loads(row["state_json"]) if row else self._empty_session()
+                version = int(row["version"]) if row else 0
+                if expected_version is not None and expected_version != version:
                     conn.execute("ROLLBACK")
-                    raise
-        return await asyncio.to_thread(save)
+                    return {"changed": False, "conflict": True, "version": version}
+                changed = False
+                for key, value in patch.items():
+                    if key not in allowed or value is None:
+                        continue
+                    if isinstance(value, list):
+                        value = [self.sanitize(str(item))[:300] for item in value]
+                        value = [item for item in value if item][:12]
+                    else:
+                        value = self.sanitize(str(value))[:500]
+                    if value and state.get(key) != value:
+                        state[key] = value
+                        changed = True
+                if not changed:
+                    conn.execute("ROLLBACK")
+                    return {"changed": False, "conflict": False, "version": version}
+                version += 1
+                state["version"] = version
+                state["last_updated_turn"] = int(state.get("last_updated_turn") or 0) + 1
+                state["updated_at"] = int(time.time())
+                conn.execute("INSERT INTO memory_v3_sessions(chat_id,user_id,session_id,state_json,version,updated_at,expires_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(chat_id,user_id,session_id) DO UPDATE SET state_json=excluded.state_json,version=excluded.version,updated_at=excluded.updated_at,expires_at=excluded.expires_at", (int(message.chat_id), int(message.sender_id), session_id, json.dumps(state, ensure_ascii=False), version, time.time(), time.time() + ttl_seconds))
+                conn.execute("COMMIT")
+                return {"changed": True, "conflict": False, "version": version}
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return await self._submit(save)
 
     async def metric(self, trace_id: str, kind: str, payload: dict[str, Any]) -> None:
-        def save() -> None:
-            with sqlite_txn(self._conn()) as conn:
-                conn.execute("INSERT INTO memory_v3_metrics(trace_id,kind,payload_json,created_at) VALUES(?,?,?,?)", (trace_id, kind, json.dumps(payload, ensure_ascii=False), time.time()))
         try:
-            await asyncio.to_thread(save)
+            await self._submit(lambda conn: conn.execute("INSERT INTO memory_v3_metrics(trace_id,kind,payload_json,created_at) VALUES(?,?,?,?)", (trace_id, kind, json.dumps(payload, ensure_ascii=False), time.time())))
         except sqlite3.DatabaseError:
             return
 
-    def _record_message_sync(self, message: Any, role: str = "user", text: str | None = None) -> None:
+    def _record_message(self, conn: sqlite3.Connection, message: Any, role: str = "user", text: str | None = None) -> None:
         if not getattr(message, "message_id", 0):
             return
         value = self.sanitize(text if text is not None else message.text)
         if not value:
             return
-        with sqlite_txn(self._conn()) as conn:
-            conn.execute(
-                """INSERT OR IGNORE INTO memory_v3_messages(
-                    platform,account_scope,chat_id,message_id,reply_to_message_id,sender_id,
-                    sender_label,role,text,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        conn.execute(
+            """INSERT OR IGNORE INTO memory_v3_messages(
+                platform,account_scope,chat_id,message_id,reply_to_message_id,sender_id,
+                sender_label,role,text,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (
                     message.platform or "telegram", message.account_scope or "default", int(message.chat_id),
                     int(message.message_id), message.reply_to_message_id, int(message.sender_id),
@@ -459,40 +481,39 @@ class MemoryV3Service:
     async def record_message(self, message: Any, role: str = "user", text: str | None = None) -> None:
         if role == "user" and getattr(message, "sender_is_bot", False):
             return
-        await asyncio.to_thread(self._record_message_sync, message, role, text)
+        await self._submit(lambda conn: self._record_message(conn, message, role, text))
 
-    def _thread_context_sync(self, message: Any, max_depth: int, sibling_limit: int) -> ThreadContext:
+    def _thread_context(self, conn: sqlite3.Connection, message: Any, max_depth: int, sibling_limit: int) -> ThreadContext:
         platform = message.platform or "telegram"
         account_scope = message.account_scope or "default"
         chat_id = int(message.chat_id)
         parent = message.reply_to_message_id
         ancestors: list[ThreadMessage] = []
         seen: set[int] = set()
-        with sqlite_txn(self._conn()) as conn:
-            while parent and parent not in seen and len(ancestors) < max_depth:
-                seen.add(int(parent))
-                row = conn.execute(
-                    """SELECT * FROM memory_v3_messages WHERE platform=? AND account_scope=?
-                       AND chat_id=? AND message_id=?""",
-                    (platform, account_scope, chat_id, int(parent)),
-                ).fetchone()
-                if not row:
-                    break
-                ancestors.append(ThreadMessage(
-                    int(row["message_id"]), row["reply_to_message_id"], int(row["sender_id"]),
-                    row["sender_label"], row["role"], row["text"], int(row["created_at"]),
-                ))
-                parent = row["reply_to_message_id"]
-            branch_ids = tuple([int(message.reply_to_message_id or 0), *[r.message_id for r in ancestors]])
-            placeholders = ",".join("?" for _ in branch_ids if _)
-            sibling_rows = []
-            if placeholders:
-                sibling_rows = conn.execute(
-                    f"""SELECT * FROM memory_v3_messages WHERE platform=? AND account_scope=? AND chat_id=?
-                        AND reply_to_message_id IN ({placeholders}) AND message_id<>?
-                        ORDER BY message_id DESC LIMIT ?""",
-                    (platform, account_scope, chat_id, *[v for v in branch_ids if v], int(message.message_id), sibling_limit),
-                ).fetchall()
+        while parent and parent not in seen and len(ancestors) < max_depth:
+            seen.add(int(parent))
+            row = conn.execute(
+                """SELECT * FROM memory_v3_messages WHERE platform=? AND account_scope=?
+                   AND chat_id=? AND message_id=?""",
+                (platform, account_scope, chat_id, int(parent)),
+            ).fetchone()
+            if not row:
+                break
+            ancestors.append(ThreadMessage(
+                int(row["message_id"]), row["reply_to_message_id"], int(row["sender_id"]),
+                row["sender_label"], row["role"], row["text"], int(row["created_at"]),
+            ))
+            parent = row["reply_to_message_id"]
+        branch_ids = tuple([int(message.reply_to_message_id or 0), *[r.message_id for r in ancestors]])
+        placeholders = ",".join("?" for _ in branch_ids if _)
+        sibling_rows = []
+        if placeholders:
+            sibling_rows = conn.execute(
+                f"""SELECT * FROM memory_v3_messages WHERE platform=? AND account_scope=? AND chat_id=?
+                    AND reply_to_message_id IN ({placeholders}) AND message_id<>?
+                    ORDER BY message_id DESC LIMIT ?""",
+                (platform, account_scope, chat_id, *[v for v in branch_ids if v], int(message.message_id), sibling_limit),
+            ).fetchall()
         chain_ids = {row.message_id for row in ancestors}
         siblings = tuple(
             ThreadMessage(int(row["message_id"]), row["reply_to_message_id"], int(row["sender_id"]), row["sender_label"], row["role"], row["text"], int(row["created_at"]))
@@ -506,7 +527,8 @@ class MemoryV3Service:
         return ThreadContext(tuple(ancestors), siblings, tuple(participants))
 
     async def thread_context(self, message: Any, *, max_depth: int = 8, sibling_limit: int = 12) -> ThreadContext:
-        return await asyncio.to_thread(self._thread_context_sync, message, max(1, min(max_depth, 16)), max(0, min(sibling_limit, 24)))
+        depth, siblings = max(1, min(max_depth, 16)), max(0, min(sibling_limit, 24))
+        return await self._submit(lambda conn: self._thread_context(conn, message, depth, siblings))
 
     def _migrate_v2_sync(self, source_path: str) -> dict[str, int]:
         source = Path(source_path)
@@ -523,8 +545,7 @@ class MemoryV3Service:
         finally:
             source_conn.close()
         for row in rows:
-            with sqlite_txn(self._conn()) as conn:
-                exists = conn.execute("SELECT 1 FROM memory_v3_migrations WHERE source_name=? AND source_id=?", (source_name, row["id"])).fetchone()
+            exists = self._run(lambda conn, source_id=row["id"]: conn.execute("SELECT 1 FROM memory_v3_migrations WHERE source_name=? AND source_id=?", (source_name, source_id)).fetchone())
             if exists:
                 continue
             old_scope = row["scope"]
@@ -545,8 +566,7 @@ class MemoryV3Service:
                 self._put_sync(item)
             except sqlite3.IntegrityError:
                 pass
-            with sqlite_txn(self._conn()) as conn:
-                conn.execute("INSERT OR IGNORE INTO memory_v3_migrations(source_name,source_id,migrated_at) VALUES(?,?,?)", (source_name, row["id"], time.time()))
+            self._run(lambda conn, source_id=row["id"]: conn.execute("INSERT OR IGNORE INTO memory_v3_migrations(source_name,source_id,migrated_at) VALUES(?,?,?)", (source_name, source_id, time.time())))
             imported += 1
         return {"items": imported, "sessions": 0, "missing": 0}
 
@@ -581,13 +601,11 @@ class MemoryV3Service:
         def import_item(table: str, legacy_id: Any, item: MemoryV3Item) -> None:
             nonlocal imported
             source_id = f"{table}:{legacy_id}"
-            with sqlite_txn(self._conn()) as conn:
-                exists = conn.execute("SELECT 1 FROM memory_v3_migrations WHERE source_name=? AND source_id=?", (source_name, source_id)).fetchone()
+            exists = self._run(lambda conn: conn.execute("SELECT 1 FROM memory_v3_migrations WHERE source_name=? AND source_id=?", (source_name, source_id)).fetchone())
             if exists:
                 return
             self._put_sync(item)
-            with sqlite_txn(self._conn()) as conn:
-                conn.execute("INSERT OR IGNORE INTO memory_v3_migrations(source_name,source_id,migrated_at) VALUES(?,?,?)", (source_name, source_id, time.time()))
+            self._run(lambda conn: conn.execute("INSERT OR IGNORE INTO memory_v3_migrations(source_name,source_id,migrated_at) VALUES(?,?,?)", (source_name, source_id, time.time())))
             imported += 1
 
         try:
@@ -651,8 +669,7 @@ class MemoryV3Service:
             if "memory_items" in tables:
                 for row in rows("memory_items"):
                     source_id = f"memory_items:{row['id']}"
-                    with sqlite_txn(self._conn()) as conn:
-                        conn.execute("INSERT OR IGNORE INTO memory_v3_quarantine(source_name,source_id,reason,created_at) VALUES(?,?,?,?)", (source_name, source_id, "legacy_memory_items_has_no_chat_or_owner_scope", time.time()))
+                    self._run(lambda conn, source_id=source_id: conn.execute("INSERT OR IGNORE INTO memory_v3_quarantine(source_name,source_id,reason,created_at) VALUES(?,?,?,?)", (source_name, source_id, "legacy_memory_items_has_no_chat_or_owner_scope", time.time())))
 
         finally:
             source_conn.close()
@@ -661,11 +678,35 @@ class MemoryV3Service:
     async def migrate_legacy_zero(self, source_path: str) -> dict[str, int]:
         return await asyncio.to_thread(self._migrate_legacy_zero_sync, source_path)
 
+    def _forget_user(self, conn: sqlite3.Connection, chat_id: int, user_id: int) -> int:
+        now = time.time()
+        rows = conn.execute(
+            "SELECT id FROM memory_v3_items WHERE status='active' AND chat_id=? AND (owner_user_id=? OR subject_user_id=?)",
+            (int(chat_id), int(user_id), int(user_id)),
+        ).fetchall()
+        ids = [str(row["id"]) for row in rows]
+        if ids:
+            conn.execute(
+                f"UPDATE memory_v3_items SET status='deleted', updated_at=? WHERE id IN ({','.join('?' for _ in ids)})",
+                (now, *ids),
+            )
+            for item_id in ids:
+                try:
+                    conn.execute("DELETE FROM memory_v3_fts WHERE id=?", (item_id,))
+                except sqlite3.DatabaseError:
+                    pass
+        conn.execute(
+            "DELETE FROM memory_v3_messages WHERE chat_id=? AND sender_id=?",
+            (int(chat_id), int(user_id)),
+        )
+        return len(ids)
+
+    async def forget_user(self, chat_id: int, user_id: int) -> int:
+        return await self._submit(lambda conn: self._forget_user(conn, int(chat_id), int(user_id)))
+
     def count_items(self) -> int:
-        with sqlite_txn(self._conn()) as conn:
-            return int(conn.execute("SELECT count(*) FROM memory_v3_items").fetchone()[0])
+        return int(self._run(lambda conn: conn.execute("SELECT count(*) FROM memory_v3_items").fetchone()[0]))
 
     def item_by_legacy_id(self, legacy_id: str) -> dict[str, Any] | None:
-        with sqlite_txn(self._conn()) as conn:
-            row = conn.execute("SELECT * FROM memory_v3_items WHERE legacy_id=?", (legacy_id,)).fetchone()
+        row = self._run(lambda conn: conn.execute("SELECT * FROM memory_v3_items WHERE legacy_id=?", (legacy_id,)).fetchone())
         return dict(row) if row else None

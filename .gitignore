@@ -56,11 +56,20 @@ tgsearch_joined.json
 .git/
 .hermes/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .venv/
+.venv*/
 venv/
 env/
 __pycache__/
 node_modules/
+
+# Python build output. A wheel build or `pip install .` otherwise leaves 160+
+# untracked copies of the source tree beside it.
+build/
+dist/
+*.egg-info/
 
 # Local-only live/debug helpers may contain identifiers or sessions
 scripts/real_tests.py
@@ -72,4 +81,3 @@ scripts/tg_source_manager.py
 scripts/sticker_prototype.py
 scripts/reaction_prototype.py
 sbom.cdx.json
-"*.txt"  

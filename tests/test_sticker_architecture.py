@@ -163,7 +163,7 @@ async def test_automatic_chance_never_blocks_a_direct_request(tmp_path):
     brain.store = store
     brain._client = client
     brain._sticker_send_lock = asyncio.Lock()
-    with patch("zero.brain.random.random", return_value=0.9):
+    with patch("zero.brain_media.random.random", return_value=0.9):
         automatic = await brain._send_sticker_once(-1001, "funny", direct_request=False)
     direct = await brain._send_sticker_once(-1001, "funny", direct_request=True)
     assert automatic.reason == "chance_rejected"

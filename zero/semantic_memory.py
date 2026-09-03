@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from .sqlite_tx import sqlite_txn
 import hashlib
 import json
 import logging
@@ -8,7 +7,11 @@ import re
 import sqlite3
 import time
 import uuid
+import weakref
 from pathlib import Path
+from typing import Any, Callable
+
+from .db_executor import SqliteWorker
 
 logger = logging.getLogger('zero.semantic_memory')
 
@@ -58,6 +61,18 @@ class SemanticUserMemory:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.backend = backend
         migrate_semantic_user_memory(self.db_path)
+        # Reopening a connection and re-issuing its three PRAGMAs costs ~1.3 ms
+        # against ~6 us of query on a kept connection, so 99% of every call here
+        # was setup. `retrieve` runs twice per composed context, which made this
+        # module 3.5 ms of a 7.4 ms composition, on the event loop thread. One
+        # worker thread owns one connection instead; `_conn` still hands out a
+        # fresh caller-owned connection, because callers pass it to `sqlite_txn`
+        # or to `with ... as con`, both of which close what they are given.
+        self._worker = SqliteWorker(self._conn, name=f'zero-semantic-{self.db_path.name}')
+        # Instances are routinely created without an explicit shutdown (brain,
+        # panel, ~10 test files); the finalizer is what stops the thread and its
+        # file handle from outliving the object.
+        self._finalizer = weakref.finalize(self, self._worker.close)
 
     def _conn(self):
         con = sqlite3.connect(self.db_path, timeout=5)
@@ -66,6 +81,19 @@ class SemanticUserMemory:
         con.execute('PRAGMA busy_timeout=5000')
         con.execute('PRAGMA foreign_keys=ON')
         return con
+
+    def _run(self, operation: Callable[[sqlite3.Connection], Any]) -> Any:
+        """Run *operation(con)* on this module's sqlite thread, one at a time.
+
+        The worker wraps every job in the same commit-on-success /
+        rollback-on-error scope `sqlite_txn` provided, and being single-threaded
+        it preserves the read-modify-write atomicity `BEGIN IMMEDIATE` is there
+        for even when several threads call in at once.
+        """
+        return self._worker.run(operation)
+
+    def close(self) -> None:
+        self._worker.close()
 
     def _sync_rag_memory(self, con: sqlite3.Connection, memory_id: int) -> None:
         """Keep an optional ZeroStore RAG index consistent in the same transaction."""
@@ -106,7 +134,7 @@ class SemanticUserMemory:
         now = int(time.time())
         value_json = json.dumps(value, ensure_ascii=False)
         source_hash = hashlib.sha256(source_text.encode()).hexdigest()
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             con.execute('BEGIN IMMEDIATE')
             existing = con.execute("SELECT id,confidence,evidence_message_ids_json FROM semantic_user_memory_candidates WHERE chat_id=? AND sender_id=? AND category=? AND key=? AND value_json=? AND status='pending' ORDER BY id DESC LIMIT 1", (chat_id, sender_id, category, key, value_json)).fetchone()
             if existing:
@@ -118,10 +146,11 @@ class SemanticUserMemory:
             con.commit()
             logger.info('SEMANTIC_CANDIDATE_CREATED chat_id=%s sender_id=%s candidate_id=%s confidence=%.2f', chat_id, sender_id, cur.lastrowid, confidence)
             return int(cur.lastrowid)
+        return self._run(_op)
 
     def approve(self, candidate_id: int, reviewer_id: int, ttl_seconds: int | None = None) -> int:
         now = int(time.time())
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             con.execute('BEGIN IMMEDIATE')
             row = con.execute("SELECT * FROM semantic_user_memory_candidates WHERE id=? AND status='pending'", (candidate_id,)).fetchone()
             if not row or row['confidence'] < 0.6:
@@ -144,16 +173,18 @@ class SemanticUserMemory:
             con.commit()
             logger.info('SEMANTIC_MEMORY_CONFLICT_RESOLVED candidate_id=%s memory_id=%s', candidate_id, cur.lastrowid)
             return int(cur.lastrowid)
+        return self._run(_op)
 
     def audit_event(self, event_type: str, *, item_id: int | None, chat_id: int, sender_id: int, actor_id: int, action: str, reason: str = '', trace_id: str | None = None) -> str:
         trace_id = trace_id or uuid.uuid4().hex
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             con.execute('INSERT INTO semantic_memory_audit(event_type,trace_id,item_id,chat_id,sender_id,actor_id,action,reason,timestamp) VALUES(?,?,?,?,?,?,?,?,?)', (event_type, trace_id, item_id, chat_id, sender_id, actor_id, action, reason[:500], int(time.time())))
             con.commit()
+        self._run(_op)
         return trace_id
 
     def inspect_for_actor(self, memory_id: int, *, chat_id: int, sender_id: int, actor_id: int, owner_id: int | None = None, trace_id: str | None = None) -> dict:
-        with sqlite_txn(self._conn()) as con: row = con.execute('SELECT * FROM semantic_user_memory WHERE id=?', (memory_id,)).fetchone()
+        row = self._run(lambda con: con.execute('SELECT * FROM semantic_user_memory WHERE id=?', (memory_id,)).fetchone())
         if not row: raise ValueError('memory_not_found')
         override = owner_id is not None and int(actor_id) == int(owner_id)
         if not override and (int(row['chat_id']) != int(chat_id) or int(row['sender_id']) != int(sender_id)):
@@ -178,16 +209,17 @@ class SemanticUserMemory:
 
     def retrieve(self, chat_id: int, sender_id: int, limit: int = 20) -> list[dict]:
         now = int(time.time())
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             rows = con.execute("SELECT * FROM semantic_user_memory WHERE chat_id=? AND sender_id=? AND status='active' AND (expires_at IS NULL OR expires_at>=?) ORDER BY last_verified_at DESC,id DESC LIMIT ?", (chat_id,sender_id,now,limit)).fetchall()
             return [dict(r) | {'value': json.loads(r['value_json']), 'evidence_message_ids': json.loads(r['evidence_message_ids_json'])} for r in rows]
+        return self._run(_op)
 
     def correct(self, memory_id: int, value, reviewer_id: int) -> int:
         value_json = json.dumps(value, ensure_ascii=False)
         if SENSITIVE.search(value_json):
             raise ValueError('invalid_or_sensitive_candidate')
         now = int(time.time())
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             con.execute('BEGIN IMMEDIATE')
             row=con.execute('SELECT * FROM semantic_user_memory WHERE id=? AND status="active"',(memory_id,)).fetchone()
             if not row: raise ValueError('memory_not_found')
@@ -200,12 +232,14 @@ class SemanticUserMemory:
             self._sync_rag_memory(con, int(memory_id))
             self._sync_rag_memory(con, int(created.lastrowid))
             return int(created.lastrowid)
+        return self._run(_op)
 
     def forget(self, chat_id: int, sender_id: int, key: str | None = None) -> int:
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             rows = con.execute('SELECT id FROM semantic_user_memory WHERE chat_id=? AND sender_id=? AND status="active"' + (' AND key=?' if key is not None else ''), ([chat_id,sender_id,key] if key is not None else [chat_id,sender_id])).fetchall()
             q='UPDATE semantic_user_memory SET status="deleted",last_seen_at=? WHERE chat_id=? AND sender_id=? AND status="active"'; args=[int(time.time()),chat_id,sender_id]
             if key is not None: q += ' AND key=?'; args.append(key)
             cur=con.execute(q,args)
             for row in rows: self._sync_rag_memory(con, int(row['id']))
             con.commit(); return cur.rowcount
+        return self._run(_op)

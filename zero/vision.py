@@ -38,6 +38,13 @@ class VisionRateLimiter:
             counts[user_id] = [ts for ts in counts[user_id] if now - ts < window]
             if not counts[user_id]:
                 del counts[user_id]
+        # _last_request was never pruned, so it kept one entry per distinct
+        # sender for the lifetime of the listener. The cooldown only matters
+        # inside the window, so older entries cannot change a decision.
+        cutoff = now - max(window, self.config.vision.cooldown_seconds)
+        for user_id, last in list(self._last_request.items()):
+            if last < cutoff:
+                del self._last_request[user_id]
 
     async def check_image_limit(self, user_id: int) -> tuple[bool, str]:
         now = time.time()
@@ -241,23 +248,22 @@ async def analyze_image_with_gemini(image_path: str | list[str], prompt: str, ap
     import urllib.request
 
     paths = [image_path] if isinstance(image_path, str) else list(image_path)
-    parts = [{"text": prompt}]
-    for path in paths[:4]:
-        with open(path, 'rb') as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
-        parts.append({"inline_data": {"mime_type": mime_type or mimetypes.guess_type(path)[0] or "image/jpeg", "data": b64}})
-
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    payload = {
-        "contents": [{
-            "parts": [
-                *parts,
-            ]
-        }],
-        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500}
-    }
 
     def _call():
+        # Reading and base64-encoding up to four media files (each up to
+        # vision.max_file_size_mb) is IO and CPU work on the hot path for every
+        # image message. It runs in the same worker thread as the request rather
+        # than on the event loop, which previously only offloaded the HTTP call.
+        parts = [{"text": prompt}]
+        for path in paths[:4]:
+            with open(path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+            parts.append({"inline_data": {"mime_type": mime_type or mimetypes.guess_type(path)[0] or "image/jpeg", "data": b64}})
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 500},
+        }
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode('utf-8'),

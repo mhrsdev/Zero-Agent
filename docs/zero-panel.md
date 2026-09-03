@@ -7,7 +7,7 @@ The administration panel is an English-only, local-first control surface served 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 export ZERO_CONFIG_PATH=/path/to/zero.yaml
 export ZERO_PANEL_HOST=127.0.0.1
 export ZERO_PANEL_PORT=8787

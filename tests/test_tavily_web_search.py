@@ -197,4 +197,9 @@ async def test_tavily_health_is_fail_safe_when_configured_key_is_missing(monkeyp
     healthy, detail = await web.health_check()
 
     assert healthy is False
-    assert detail == "tavily API key missing"
+    # `in`, not `==`: health_check no longer returns on the first provider that
+    # has a problem, because doing so reported the tavily error even when
+    # another configured provider was working. The reason is now the collected
+    # set of problems, and the property this test protects is that the missing
+    # tavily key is named in it.
+    assert "tavily API key missing" in detail

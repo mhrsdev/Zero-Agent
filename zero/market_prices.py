@@ -76,7 +76,14 @@ class BinancePriceClient:
             'cached': False,
         }
         async with self._lock:
-            self._cache[pair] = _CachedPrice(time.monotonic() + self.CACHE_TTL, result)
+            # Entries expired logically but were never removed, and `pair` is
+            # derived from an LLM tool argument validated only as a symbol shape,
+            # so the model could mint unbounded distinct keys. Drop what has
+            # aged out on every write.
+            now = time.monotonic()
+            for stale in [key for key, entry in self._cache.items() if entry.expires_at <= now]:
+                self._cache.pop(stale, None)
+            self._cache[pair] = _CachedPrice(now + self.CACHE_TTL, result)
         return result
 
 
@@ -93,7 +100,10 @@ class NavasanPriceClient:
             from .fsprivacy import path_is_private
             if not path_is_private(self.api_key_path):
                 raise PriceAPIError('کلید Navasan permission امن ندارد.')
-            key = open(self.api_key_path, encoding='utf-8').read().strip()
+            # `with`, not a bare open(): the credential file handle otherwise
+            # stayed open until GC, and this runs on the event loop.
+            with open(self.api_key_path, encoding='utf-8') as handle:
+                key = handle.read().strip()
         except PriceAPIError:
             raise
         except (OSError, UnicodeError) as exc:

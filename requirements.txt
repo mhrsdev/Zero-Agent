@@ -7,7 +7,5 @@ PyYAML==6.0.2
 aiosqlite==0.20.0
 pydantic==2.9.2
 python-dotenv==1.2.3
-pytest==9.1.1
-pytest-asyncio==1.4.0
 # Required by zoneinfo-based timezone validation on Windows (no system tz db).
 tzdata>=2024.1

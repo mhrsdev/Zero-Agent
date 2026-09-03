@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import runpy
 import sqlite3
 import sys
@@ -38,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show")
     show.add_argument("--path", default=str(canonical_config_path()))
+    replay = sub.add_parser("replay", help="replay a stored message without Telegram")
+    replay.add_argument("--chat-id", type=int, required=True)
+    replay.add_argument("--message-id", type=int, required=True)
+    replay.add_argument("--db", type=Path, default=None)
+    replay.add_argument("--config", type=Path, default=None, help="Path to legacy runtime YAML")
     return parser
 
 
@@ -118,6 +124,70 @@ def diagnostics(
             results.append(_check(f"dependency_{name}", True, "importable"))
         except ImportError as exc:
             results.append(_check(f"dependency_{name}", False, str(exc)))
+
+    env_id = os.environ.get("ZERO_INSTALLATION_ID")
+    if config_path.exists() and env_id:
+        try:
+            canonical_id = ConfigStore(config_path).load().installation_id
+            results.append(
+                _check(
+                    "config_drift",
+                    canonical_id == env_id,
+                    f"canonical={canonical_id} env={env_id}",
+                )
+            )
+        except (OSError, ValueError) as exc:
+            results.append(_check("config_drift", False, type(exc).__name__))
+    else:
+        results.append(_check("config_drift", True, "no installation_id conflict"))
+
+    strict = str(os.environ.get("ZERO_CONFIG_STRICT", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if strict:
+        both = config_path.exists() and runtime_path.is_file()
+        results.append(_check("config_strict_layers", both, "canonical and runtime YAML must both exist"))
+
+    tenancy_db = home / "state" / "tenancy.db"
+    if tenancy_db.is_file():
+        try:
+            db = sqlite3.connect(str(tenancy_db))
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            db.close()
+            needed = {"installations", "groups", "memberships", "group_settings"}
+            results.append(_check("tenancy_schema", needed <= tables, f"tables={sorted(tables)}"))
+        except sqlite3.Error as exc:
+            results.append(_check("tenancy_schema", False, type(exc).__name__))
+    else:
+        results.append(_check("tenancy_schema", True, "not created yet"))
+
+    office_cli = Path("/usr/local/lib/zero-office/officecli")
+    if runtime_path.is_file():
+        try:
+            from .config import ZeroConfig
+
+            office_cli = Path(ZeroConfig.load(runtime_path).office.cli_path or office_cli)
+        except Exception:
+            pass
+    results.append(_check("officecli", True, "present" if office_cli.exists() else "absent"))
+
+    secret_file = Path(os.environ.get("ZERO_SECRET_FILE") or (home / "secrets" / "zero.secrets.yaml"))
+    if secret_file.exists():
+        mode = secret_file.stat().st_mode & 0o777
+        results.append(_check("secret_permissions", mode in {0o600, 0o400}, f"mode={oct(mode)}"))
+    else:
+        results.append(_check("secret_permissions", True, "absent"))
+
+    if runtime_path.is_file():
+        try:
+            from .config import ZeroConfig
+            from .providers.from_config import registry_from_runtime_config
+
+            registry = registry_from_runtime_config(ZeroConfig.load(runtime_path))
+            names = list(registry.names()) if registry is not None else []
+            results.append(_check("provider_profiles", True, ",".join(names) or "legacy-pools"))
+        except Exception as exc:
+            results.append(_check("provider_profiles", False, type(exc).__name__))
+    else:
+        results.append(_check("provider_profiles", True, "no runtime yaml"))
 
     return results
 
@@ -239,6 +309,20 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "no_animation", False):
             tui_args.append("--no-animation")
         return tui_main(tui_args)
+    if args.command == "replay":
+        from .config import ZeroConfig
+        from .replay import replay_to_json, run_replay
+        from .runtime_config import runtime_config_path
+
+        config_file = args.config or Path(runtime_config_path())
+        try:
+            config = ZeroConfig.load(config_file)
+        except Exception:
+            print(json.dumps({"error": "configuration validation failed"}))
+            return 1
+        payload = run_replay(config, chat_id=args.chat_id, message_id=args.message_id, db_path=str(args.db) if args.db else None)
+        print(replay_to_json(payload))
+        return 0 if payload.get("ok") else 1
     if args.command == "config" and args.config_command == "show":
         try:
             config = ConfigStore(args.path).load()

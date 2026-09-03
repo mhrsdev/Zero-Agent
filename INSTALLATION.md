@@ -67,7 +67,25 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-The repository also contains `requirements.lock` with hashes. The Docker builder installs that lock file with `pip install --require-hashes`; the manual requirements file is the source-provided developer entry point.
+The repository also contains `requirements.lock`: a hash-pinned, multi-platform
+(`uv pip compile --universal`) resolution of `requirements.txt`. The Docker
+builder installs it with `pip install --require-hashes`, and both one-line
+installers prefer it over `requirements.txt` when it is present. Because pip
+switches to hash-checking mode as soon as any hash appears in a requirements
+file, the lock must pin every transitive dependency for every supported OS —
+regenerate it with `--universal`, never for a single platform:
+
+```bash
+uv pip compile --generate-hashes --universal --python-version 3.11 \
+  requirements.txt -o requirements.lock
+```
+
+`requirements.txt` is the runtime dependency set only. Add
+`-r requirements-dev.txt` when you also intend to run the test suite:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+```
 
 Copy the example runtime configuration without putting real credentials into Git:
 

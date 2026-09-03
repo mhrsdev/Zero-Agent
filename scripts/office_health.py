@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from zero.config import ZeroConfig
 from zero.runtime_config import runtime_config_path
+from zero.sqlite_tx import sqlite_txn
 
 
 def main() -> int:
@@ -43,7 +44,7 @@ def main() -> int:
     except OSError:
         checks["workspace_writable"] = False
     try:
-        with sqlite3.connect(config.memory.db_path) as conn:
+        with sqlite_txn(sqlite3.connect(config.memory.db_path)) as conn:
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             checks["migration"] = {"office_jobs", "office_quota_usage", "office_delivery_outbox"} <= tables
             row = conn.execute("SELECT value FROM office_metrics WHERE name='office_worker_heartbeat_epoch'").fetchone()

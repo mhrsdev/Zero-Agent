@@ -10,7 +10,8 @@ CREATE INDEX IF NOT EXISTS idx_world_relation_subject ON world_relations(subject
 '''
 PERSONAL=re.compile(r'password|token|api[_ -]?key|secret|private key|رمز|توکن|کلید خصوصی',re.I)
 def migrate_world_model(db_path:str|Path):
- with sqlite3.connect(db_path,timeout=5) as c:c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');c.executescript(SCHEMA);c.commit()
+ # sqlite_txn closes the handle; a bare `with sqlite3.connect(...)` only commits.
+ with sqlite_txn(sqlite3.connect(db_path,timeout=5)) as c:c.execute('PRAGMA busy_timeout=5000');c.execute('PRAGMA journal_mode=WAL');c.execute('PRAGMA foreign_keys=ON');c.executescript(SCHEMA);c.commit()
 class WorldModel:
  def __init__(self,db_path):self.db_path=Path(db_path);self.db_path.parent.mkdir(parents=True,exist_ok=True);migrate_world_model(self.db_path)
  def _c(self):
