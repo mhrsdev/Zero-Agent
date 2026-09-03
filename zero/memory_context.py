@@ -16,9 +16,14 @@ _RAG_CUES = ("یادت", "قبلاً", "قبلا", "همون", "اون موقع"
 
 def _line(row: dict[str, Any], text_cap: int = 420) -> str:
     text = " ".join(str(row.get("text") or "").split())[:text_cap]
+    # `reply_to_message_id=none` is omitted rather than spelled out: absence
+    # already means "not a reply", and the field is ~26 characters that were
+    # re-sent for every non-reply message in two blocks of every prompt.
+    reply_to = row.get("reply_to_message_id")
+    reply_field = f"reply_to_message_id={reply_to} " if reply_to else ""
     return (
         f"telegram_message_id={row.get('telegram_message_id') or 'legacy:' + str(row.get('id', 'unknown'))} "
-        f"reply_to_message_id={row.get('reply_to_message_id') or 'none'} "
+        f"{reply_field}"
         f"sender_id={row.get('sender_id')} role={row.get('role', '')} "
         f"sender_label={row.get('sender_label', '')!r} text={text!r}"
     )

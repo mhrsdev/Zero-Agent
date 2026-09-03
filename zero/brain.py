@@ -1206,6 +1206,16 @@ class ZeroBrain:
             reply_sender_id=message.reply_sender_id, reply_sender_label=message.reply_sender_label, reply_sender_is_bot=message.reply_sender_is_bot,
             deep_research=deep_search,
         )
+        # Prompt size is the per-message cost of this system and nothing measured
+        # it: the legacy router reads len(prompt) only to order providers, and
+        # input_tokens is reported by the ProviderRegistry, which is not the
+        # default composition. Logged per block so a block that starts growing is
+        # attributable instead of showing up only on the bill.
+        logger.info(
+            'PROMPT_BUILT trace_id=%s chars=%d memory_chars=%d web_chars=%d group_summary_chars=%d recent_lines=%d deep=%s',
+            trace_id, len(prompt), len(memory_context or ''), len(web_context or ''),
+            len(group_summary or ''), len(live_group_context.splitlines()), deep_search,
+        )
         tool_evidence: dict = {}
         reply_text = await self._generate_with_knowledge_tool(message, prompt, chat_id=message.chat_id, evidence=tool_evidence)
         raw_link_requested = bool(re.search(r'(?:لینک\s+خام|url\s+خام|raw\s+(?:link|url))', clean_user_text, re.I))
