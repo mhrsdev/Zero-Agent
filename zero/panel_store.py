@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import sqlite3
 import time
 from pathlib import Path
@@ -20,6 +21,11 @@ from .configuration import (
     restrict_private_file,
 )
 from .paths import zero_home
+from .sqlite_tx import sqlite_txn
+
+# Shares the panel's logger so a storage failure reaches the same file the panel
+# serves back through /api/logs.
+logger = logging.getLogger("zero.panel")
 
 SETUP_STEPS = (
     "welcome",
@@ -100,8 +106,13 @@ class PanelStore:
         self.setup_service = setup_service
         try:
             managed_runtime_path = self.path.parent.resolve() == zero_home().resolve()
-        except OSError:
+        except OSError as exc:
+            # Deciding "not managed" skips the permission repair on an existing
+            # directory, so an unresolvable path can leave the panel database in
+            # a directory whose inherited access was never stripped. Recorded
+            # because nothing else would reveal it.
             managed_runtime_path = False
+            logger.warning('PANEL_STORE_RUNTIME_PATH_UNRESOLVED exception_type=%s', type(exc).__name__)
         ensure_private_directory(self.path.parent, repair_existing=managed_runtime_path)
         self._init()
         restrict_private_file(self.path)
@@ -114,14 +125,13 @@ class PanelStore:
     @contextmanager
     def _conn(self):
         # sqlite3's connection context manager only wraps a transaction; it
-        # never closes the connection. On Windows an open handle keeps the DB
-        # file locked and breaks rollback/cleanup paths that unlink the file.
-        db = self._connect()
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        # never closes. On Windows an open handle keeps the DB file locked and
+        # breaks rollback/cleanup paths that unlink the file. sqlite_txn owns
+        # commit, rollback and close, and never lets a close failure mask the
+        # exception that caused the rollback.
+        with sqlite_txn(self._connect()) as db:
+            yield db
+
 
     def _init(self) -> None:
         with self._conn() as db:
@@ -180,10 +190,9 @@ class PanelStore:
         """Remove a newly-created panel database and any SQLite sidecars."""
         panel_path = Path(path)
         for suffix in ("", "-journal", "-wal", "-shm"):
-            try:
+            # Absence is the goal, so it is suppressed rather than handled.
+            with suppress(FileNotFoundError):
                 panel_path.with_name(f"{panel_path.name}{suffix}").unlink()
-            except FileNotFoundError:
-                pass
 
     @staticmethod
     def _token_hash(token: str) -> str:
@@ -331,6 +340,10 @@ class PanelStore:
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         now = int(time.time())
         with self._conn() as db:
+            # Expiry was applied on lookup only, so every login left a row behind
+            # for the lifetime of the installation. Sweeping on the write path
+            # keeps the table proportional to live sessions without a timer.
+            db.execute("DELETE FROM panel_sessions WHERE expires_at<=?", (now,))
             db.execute("INSERT INTO panel_sessions VALUES(?,?,?,?,?)", (self._token_hash(token), admin_id, csrf, now, now + ttl_seconds))
         return token, csrf
 

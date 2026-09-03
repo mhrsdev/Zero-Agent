@@ -21,10 +21,38 @@ _LISTENER_PYTHON = os.environ.get("ZERO_PYTHON") or sys.executable
 
 
 def _read_pid(path: Path) -> int | None:
+    return _pid_record(path)[0]
+
+
+def _pid_record(path: Path) -> tuple[int | None, str]:
+    """Return ``(pid, record state)``.
+
+    The three failure modes are distinct and the panel renders them distinctly:
+    ``absent`` means no listener was ever started through this installation,
+    ``unreadable`` means the record exists but cannot be read (permissions, a
+    directory in its place), and ``malformed`` means it holds no pid. Only
+    ``absent`` justifies reporting the listener as stopped.
+    """
     try:
-        return int(path.read_text().strip())
-    except Exception:
-        return None
+        raw = path.read_text()
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError:
+        return None, "unreadable"
+    try:
+        return int(raw.strip()), "recorded"
+    except ValueError:
+        return None, "malformed"
+
+
+def _identity_is_verifiable() -> bool:
+    """Whether this host can confirm that a pid is really the listener.
+
+    Identity is checked by reading ``/proc/<pid>/cmdline``; without procfs a pid
+    match would prove nothing and pid reuse would be indistinguishable from a
+    live listener. Such a host reports ``unverified`` rather than guessing.
+    """
+    return Path("/proc").is_dir()
 
 
 def _process_identity_matches(pid: int) -> bool:
@@ -37,9 +65,19 @@ def _process_identity_matches(pid: int) -> bool:
 
 
 def listener_status() -> dict[str, str | int | bool]:
-    pid = _read_pid(LISTENER_PID)
-    running = bool(pid and _process_identity_matches(pid))
-    return {'running': running, 'pid': pid or 0}
+    """Report the listener as ``running``, ``stopped`` or ``unverified``.
+
+    ``running`` stays reserved for a pid whose process identity was confirmed, so
+    a caller that only reads that key can never be told a listener is up when it
+    is merely recorded.
+    """
+    pid, record = _pid_record(LISTENER_PID)
+    if pid is None:
+        return {'running': False, 'pid': 0, 'state': 'stopped' if record == 'absent' else 'unverified'}
+    if not _identity_is_verifiable():
+        return {'running': False, 'pid': pid, 'state': 'unverified'}
+    running = _process_identity_matches(pid)
+    return {'running': running, 'pid': pid, 'state': 'running' if running else 'stopped'}
 
 
 def start_listener() -> dict[str, str | int | bool]:
