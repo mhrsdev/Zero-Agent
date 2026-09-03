@@ -9,7 +9,23 @@ from .models import SearchResult
 
 _URL_RE = re.compile(r'https?://[^\s<>\]\[()]+', re.I)
 _DOMAIN_RE = re.compile(r'(?<![@\w-])(?:www\.)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62})(?![\w-])', re.I)
+# Suffixes that make a dotted token a filename rather than a host. Without this
+# the domain check treated `config.py`, `package.json` and `README.md` as
+# unsupported domains, so every answer on a programming topic was rejected
+# outright — a false positive that cost the whole reply, not just a citation.
+_FILENAME_SUFFIXES = frozenset({
+    'py', 'js', 'ts', 'jsx', 'tsx', 'json', 'yaml', 'yml', 'toml', 'ini', 'cfg',
+    'md', 'txt', 'rs', 'go', 'rb', 'php', 'java', 'kt', 'c', 'h', 'cpp', 'hpp',
+    'cs', 'sh', 'ps1', 'bat', 'sql', 'html', 'css', 'scss', 'lock', 'log',
+    'env', 'gitignore', 'dockerignore', 'xml', 'csv', 'tsv', 'conf', 'service',
+})
 _NUMBER_RE = re.compile(r'(?<!\w)\d[\d,.٬،]*\d|(?<!\w)\d(?!\w)')
+# Hosts that only wrap somebody else's page. The publisher field carries the real
+# outlet for these, so they must never become the displayed source name.
+_OPAQUE_REDIRECT_HOSTS = frozenset({
+    'vertexaisearch.cloud.google.com', 'grounding-api-redirect.googleapis.com',
+    't.co', 'lnkd.in', 'news.google.com',
+})
 _PRICE_MARKERS = ('تومان', 'ریال', 'دلار', 'یورو', 'usd', 'eur', '$', '€', 'قیمت', 'price')
 _DIGIT_TRANSLATION = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩٬،', '01234567890123456789,,')
 
@@ -31,6 +47,11 @@ def numeric_entities(text: str) -> list[str]:
 
 def site_name(url: str, publisher: str = '') -> str:
     host=urlsplit(url or '').netloc.lower().removeprefix('www.')
+    # A grounding redirect host says nothing a reader wants ("Vertexaisearch"),
+    # and the publisher field is where the real outlet is, so prefer it whenever
+    # the URL is one of those wrappers.
+    if host in _OPAQUE_REDIRECT_HOSTS or any(host.endswith('.' + x) for x in _OPAQUE_REDIRECT_HOSTS):
+        host = ''
     stem=host.split('.')[0] if host else (publisher or 'منبع').split('.')[0]
     return {'tgju':'TGJU','tabdeal':'Tabdeal','tala':'Tala.ir','reuters':'Reuters','bloomberg':'Bloomberg','wallex':'Wallex'}.get(stem, stem.title() or 'منبع')
 
@@ -85,15 +106,22 @@ def build_numeric_fallback(results: list[SearchResult], searched_at: str = '') -
         if not raw: continue
         value=int(_normalize_number(raw)); values.append(value)
         unit = 'تومان' if 'تومان' in text else ('ریال' if 'ریال' in text else '')
-        units.add(unit)
+        if unit:
+            units.add(unit)
         label=site_name(result.url, result.publisher)
         sources.append(source_link(result.url, result.publisher))
         if len(values)>=5: break
-    if not values or len(units) != 1:
+    # A source that states a number without naming its unit does not contradict
+    # the others; it just says less. Adding '' to the set made `len(units) != 1`
+    # true and aborted the average, which is why a live price query with one
+    # unlabelled source answered "no verifiable price from live sources" — and it
+    # made the `units - {''}` line below unreachable. Two DIFFERENT named units
+    # is a real disagreement and still refuses.
+    if not values or len(units) > 1:
         return ''
     average=round(sum(values) / len(values))
     formatted=f'{average:,}'.replace(',', '٬').translate(str.maketrans('0123456789','۰۱۲۳۴۵۶۷۸۹'))
-    unit = next(iter(units - {''}), '')
+    unit = next(iter(units), '')
     label='میانگین آخرین قیمت‌های معتبر' if len(values) > 1 else 'قیمت گزارش‌شده'
     out=f'{label}: {formatted}' + (f' {unit}' if unit else '') + '\n\nمنابع:\n'+'\n'.join(f'• {s}' for s in sources)
     if searched_at: out += f'\nزمان جست‌وجو: {searched_at}'
@@ -128,7 +156,7 @@ class TruthfulnessGuard:
 
     def guard_answer(self, answer: str, results: list[SearchResult], trusted_text: str = '') -> GuardDecision:
         source_urls = {_normalize_url(result.url) for result in results}
-        source_domains = {urlsplit(result.url).netloc.lower().removeprefix('www.') for result in results}
+        source_domains = _source_domains(results)
         source_text = ' '.join(
             f'{result.title} {result.snippet} {result.publisher} {result.published_at} {result.relevant_extract} {result.url}'
             for result in results
@@ -140,6 +168,8 @@ class TruthfulnessGuard:
                 return GuardDecision(False, 'unsupported_url')
         for domain in _DOMAIN_RE.findall(answer or ''):
             normalized = domain.lower().removeprefix('www.')
+            if _looks_like_filename(normalized):
+                continue
             if normalized not in source_domains and not any(normalized.endswith('.' + allowed) for allowed in source_domains):
                 return GuardDecision(False, 'unsupported_domain')
         low = (answer or '').lower()
@@ -148,6 +178,35 @@ class TruthfulnessGuard:
                 if len(number) >= 4 and number not in source_numbers:
                     return GuardDecision(False, 'unsupported_numeric_claim')
         return GuardDecision(True)
+
+
+def _looks_like_filename(token: str) -> bool:
+    """Whether a dotted token is a filename rather than a hostname."""
+    return token.rsplit('.', 1)[-1] in _FILENAME_SUFFIXES
+
+
+def _source_domains(results: list[SearchResult]) -> set[str]:
+    """Every host the model may legitimately name, given these results.
+
+    The result URL alone is not enough. Google Grounding returns redirect URIs
+    under ``vertexaisearch.cloud.google.com`` and carries the real publisher in
+    the title or the ``publisher`` field, so an answer that cites the outlet it
+    was shown — the normal, correct behaviour — was rejected as
+    ``unsupported_domain`` and replaced with a fallback whose links rendered as
+    "Vertexaisearch". Publisher and title are part of the evidence the model was
+    given, so a host named there is supported by definition.
+    """
+    domains: set[str] = set()
+    for result in results:
+        host = urlsplit(result.url).netloc.lower().removeprefix('www.')
+        if host:
+            domains.add(host)
+        for field in (result.publisher, result.title):
+            for match in _DOMAIN_RE.findall(field or ''):
+                candidate = match.lower().removeprefix('www.')
+                if not _looks_like_filename(candidate):
+                    domains.add(candidate)
+    return domains
 
 
 def _normalize_url(url: str) -> str:

@@ -31,7 +31,10 @@ class SearXNGProvider(SearchProvider):
         payload = await self.transport.get_text(url, self.timeout, 2_000_000)
         data = json.loads(payload)
         results: list[SearchResult] = []
-        for item in data.get('results', []):
+        # `or []` as well as a default: a server that answers {"results": null}
+        # otherwise raised TypeError, which the pipeline logged as an
+        # indistinguishable generic provider failure.
+        for item in (data.get('results') or []):
             item_engines = set(item.get('engines') or [item.get('engine') or ''])
             if self.engines and not item_engines.intersection(self.engines):
                 continue

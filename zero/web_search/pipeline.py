@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from .cache import TTLCache
 from .context import WebContextBuilder
 from .dedup import deduplicate_results
-from .extraction import _safe_public_url, has_usable_evidence
+from .extraction import _safe_public_url_async, has_usable_evidence
 from .intent import SearchIntentDetector
 from .models import ProviderFailure, SearchIntent, SearchKind, SearchOutcome, SearchResult
 from .query import QueryRewriter
@@ -28,6 +28,7 @@ class SearchPipeline:
         registry,
         retries: int = 2,
         provider_timeout: float = 12.0,
+        extract_timeout: float | None = None,
         max_results: int = 5,
         max_fetch_pages: int = 2,
         max_parallel_providers: int = 4,
@@ -43,6 +44,11 @@ class SearchPipeline:
         self.registry = registry
         self.retries = max(1, int(retries))
         self.provider_timeout = max(0.001, float(provider_timeout))
+        # Page extraction had no overall bound, only a per-socket timeout on each
+        # fetch, so a set of slow hosts could outlast the caller's entire search
+        # budget. Defaults to one provider timeout; deep search gets three times
+        # that because it extracts up to 15 pages instead of two.
+        self.extract_timeout = max(0.001, float(extract_timeout if extract_timeout is not None else provider_timeout))
         self.max_results = max(1, int(max_results))
         self.max_fetch_pages = max(0, int(max_fetch_pages))
         self.max_parallel_providers = max(1, int(max_parallel_providers))
@@ -81,7 +87,14 @@ class SearchPipeline:
             # Compatibility for narrowly scoped test/custom detectors predating reply URLs.
             intent = self.intent_detector.detect(text)
         if force_search and (text.strip() or reply_text.strip()):
-            intent = SearchIntent(True, SearchKind.WEB, True, 'explicit_web_search')
+            # Forcing a search means "search anyway", not "forget what this is
+            # about". Overwriting the category with 'explicit_web_search' cost a
+            # price query its numeric fallback, its live-market disclosure, and
+            # the `live` freshness discriminator in the cache key — so a /search
+            # price query was cached for the full TTL like any other question.
+            # A category the detector could not determine still becomes explicit.
+            category = intent.category if intent.category and intent.category not in {'none', ''} else 'explicit_web_search'
+            intent = SearchIntent(True, SearchKind.WEB, True, category)
         logger.info('WEB_INTENT trace_id=%s needed=%s kind=%s supported=%s category=%s', trace_id, intent.needed, intent.kind.value, intent.supported, intent.category)
         domain_followup = self.query_rewriter.is_domain_only_followup(text)
         state_entry = None
@@ -146,10 +159,17 @@ class SearchPipeline:
 
         successes = 0
         collected: list[SearchResult] = []
-        groups = provider_groups
         provider_slots = asyncio.Semaphore(max(self.max_parallel_providers, 6) if deep else self.max_parallel_providers)
         search_plans = self.query_rewriter.expand_deep(plan) if deep else (plan,)
-        for group in ([tuple(provider for providers in groups for provider in providers)] if deep else groups):
+        # Deep search asks every provider at once instead of walking the priority
+        # tiers, so the groups collapse into one. Empty groups are dropped rather
+        # than flattened blindly: with no provider registered — which is the
+        # shipped Google-Grounding-only configuration — the old flatten produced
+        # `[()]`, one empty group, and the next line read `group[0].priority`.
+        # SearchOrchestrator runs the local pipeline first for deep, so that
+        # IndexError escaped before the working primary was ever tried.
+        rounds = [tuple(p for providers in provider_groups for p in providers)] if deep else provider_groups
+        for group in (g for g in rounds if g):
             logger.info('WEB_PROVIDER_SELECTED trace_id=%s priority=%s providers=%s', trace_id, group[0].priority, ','.join(p.name for p in group))
 
             async def limited_call(provider, request_plan):
@@ -162,7 +182,11 @@ class SearchPipeline:
                 if failure:
                     outcome.failures.append(failure)
                 collected.extend(provider_results)
-            if collected and not deep:
+            # Stop only once something SURVIVES validation. The old check tested
+            # the raw provider output, so a single unusable row in the top tier —
+            # an empty title, a magnet: URL, an intranet host — ended the walk and
+            # the healthy priority-20 and priority-30 providers were never asked.
+            if not deep and self.truth_guard.filter_results(collected):
                 break
 
         if collected:
@@ -198,12 +222,29 @@ class SearchPipeline:
             ranked = ranked_all[:self.max_results]
         if not ranked:
             outcome.no_results = True
-            outcome.context = 'WEB_STATUS: NO_RESULTS (relevance gate rejected collected results)'
-            logger.info('WEB_RESULTS_EMPTY trace_id=%s reason=relevance_gate', trace_id)
+            # Only the deep path runs a relevance gate; on the normal path an
+            # empty `ranked` means validation dropped everything, and saying
+            # "relevance gate" sent whoever read the log looking at the wrong
+            # code.
+            reason = 'relevance_gate' if deep else 'validation_rejected_all_results'
+            outcome.context = f'WEB_STATUS: NO_RESULTS ({reason})'
+            logger.info('WEB_RESULTS_EMPTY trace_id=%s reason=%s collected=%d valid=%d unique=%d', trace_id, reason, len(collected), len(valid), len(unique))
             return outcome
         logger.info('WEB_RESULTS_RANKED trace_id=%s count=%d top_score=%.4f', trace_id, len(ranked), ranked[0].score if ranked else 0.0)
         if self.extractor is not None and ranked:
-            ranked = await self.extractor.extract_many(ranked, plan.query, 15 if deep else self.max_fetch_pages)
+            # extract_many gathers one fetch per result and had no overall bound —
+            # only per-socket timeouts — so a set of slow hosts could outlast the
+            # caller's whole search budget. On timeout the results are kept and
+            # rendered from their snippets, which is what the extractor's own
+            # per-result failure path already does.
+            budget = self.extract_timeout * (3 if deep else 1)
+            try:
+                ranked = await asyncio.wait_for(
+                    self.extractor.extract_many(ranked, plan.query, 15 if deep else self.max_fetch_pages),
+                    timeout=budget,
+                )
+            except asyncio.TimeoutError:
+                logger.warning('WEB_EXTRACTION_TIMEOUT trace_id=%s budget_seconds=%.1f result_count=%d', trace_id, budget, len(ranked))
         outcome.results = ranked
         searched_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         context_builder = WebContextBuilder(20000) if deep else self.context_builder
@@ -216,7 +257,10 @@ class SearchPipeline:
 
     async def _inspect_url(self, intent: SearchIntent, plan, trace_id: str) -> SearchOutcome:
         outcome = SearchOutcome(intent=intent, plan=plan)
-        if not _safe_public_url(plan.query):
+        # Awaited, not called inline: this resolves DNS, which is synchronous and
+        # takes no timeout, so on the event loop an unreachable resolver stalled
+        # every other coroutine for the OS resolver timeout.
+        if not await _safe_public_url_async(plan.query):
             outcome.all_providers_failed = True
             outcome.context = 'WEB_STATUS: URL_REJECTED'
             logger.info('WEB_URL_REJECTED trace_id=%s', trace_id)
@@ -311,12 +355,30 @@ class SearchPipeline:
                 last_failure = ProviderFailure(provider.name, 'timeout', True, attempt)
                 logger.warning('WEB_PROVIDER_TIMEOUT trace_id=%s provider=%s attempt=%d timeout=%.3f', trace_id, provider.name, attempt, self.provider_timeout)
             except Exception as exc:
-                last_failure = ProviderFailure(provider.name, type(exc).__name__, False, attempt)
-                logger.warning('WEB_PROVIDER_FAILED trace_id=%s provider=%s attempt=%d exception_type=%s', trace_id, provider.name, attempt, type(exc).__name__)
+                reason = _failure_reason(exc)
+                last_failure = ProviderFailure(provider.name, reason, False, attempt)
+                # The reason, not just the class name: every transport failure
+                # used to be a bare RuntimeError, so a 403 from a SearXNG
+                # instance with JSON disabled, a 400 from a bad payload, a 502
+                # and a blocked private destination were one indistinguishable
+                # log line.
+                logger.warning('WEB_PROVIDER_FAILED trace_id=%s provider=%s attempt=%d exception_type=%s reason=%s', trace_id, provider.name, attempt, type(exc).__name__, reason)
         return [], last_failure, False
 
     def invalidate_cache(self) -> None:
         self.cache.invalidate()
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """A short, secret-free label for why a provider call failed.
+
+    Carries the HTTP status when there is one. Never includes the URL: a private
+    endpoint's address is not something to write into a log that may be shipped.
+    """
+    status = getattr(exc, 'status', None)
+    if status is not None:
+        return f'{type(exc).__name__}:{status}'
+    return type(exc).__name__
 
 
 def _is_http_url(value: str) -> bool:

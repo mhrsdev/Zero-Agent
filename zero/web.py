@@ -14,7 +14,7 @@ from .web_search.cache import TTLCache
 from .web_search.context import WebContextBuilder
 from .web_search.extraction import WebExtractor
 from .web_search.intent import SearchIntentDetector, is_current_market_query
-from .web_search.models import SearchIntent, SearchOutcome, SearchResult
+from .web_search.models import QueryPlan, SearchIntent, SearchKind, SearchOutcome, SearchResult
 from .web_search.orchestrator import SearchOrchestrator
 from .web_search.pipeline import SearchPipeline
 from .web_search.providers.base import ProviderRegistry
@@ -144,7 +144,23 @@ class HybridWeb:
         return self.enabled()
 
     async def run(self, text: str, **kwargs) -> SearchOutcome:
+        """Run one search, refusing when web search is switched off.
+
+        The gate lives here rather than only in :meth:`search_hits` because
+        `run` is the entry point every other caller uses, and two of them —
+        `zero/knowledge.py` and `zero/tg_source_manager.py` — check nothing
+        themselves. With the switch off, the nightly knowledge worker still made
+        outbound calls and spent grounding quota.
+        """
         kwargs.setdefault('force_search', True)
+        if not await self.is_tool_enabled():
+            plan = QueryPlan(original=text or '', query='', language='fa')
+            intent = SearchIntent(False, SearchKind.WEB, True, 'web_search_disabled')
+            logger.info('WEB_SEARCH_DISABLED trace_id=%s', kwargs.get('trace_id', '-'))
+            # Not `all_providers_failed`: nothing failed. The prompt's rules
+            # distinguish "no search happened" from "providers failed", and the
+            # difference is what the model tells the user.
+            return SearchOutcome(intent=intent, plan=plan, context='WEB_STATUS: DISABLED')
         return await self._orchestrator.run(text, **kwargs)
 
     async def search_hits(self, raw_query: str, enabled_override: Optional[bool] = None) -> list[SearchHit]:
@@ -167,8 +183,19 @@ class HybridWeb:
         return [self._compat_hit(result) for result in outcome.results]
 
     async def health_check(self) -> tuple[bool, str]:
+        """Report whether a configured provider actually answers.
+
+        Every branch here now either probes something or says it could not. The
+        previous version returned `(True, 'local-fallback')` because
+        `searxng_base_url` was a non-empty string — and the shipped default is
+        `http://127.0.0.1:8888`, for a service the installation guide says must
+        not be installed. So a deployment whose only real provider was Google
+        Grounding reported healthy without one byte leaving the process, and a
+        deployment with a working Wigolo reported the Gemini error instead.
+        """
         if not self.enabled():
             return False, 'web search disabled'
+        problems: list[str] = []
         if self.config.web.wigolo_enabled and self.config.web.wigolo_base_url:
             try:
                 raw = await self._transport.get_text(
@@ -178,18 +205,26 @@ class HybridWeb:
                 )
                 if json.loads(raw).get('status') == 'healthy':
                     return True, 'wigolo'
-            except Exception:
-                pass
+                problems.append('wigolo unhealthy')
+            except Exception as exc:
+                # Logged rather than swallowed: this used to fall through in
+                # silence and another provider was reported as the health answer.
+                logger.info('WEB_HEALTH_PROBE_FAILED provider=wigolo exception_type=%s', type(exc).__name__)
+                problems.append(f'wigolo unreachable ({type(exc).__name__})')
         if self._tavily_configured:
             if self._tavily_available:
                 return True, 'tavily'
-            return False, 'tavily API key missing'
-        if self.config.web.searxng_base_url:
-            return True, 'local-fallback'
+            problems.append('tavily API key missing')
         primary_ok, primary_error = await self._primary.health_check()
         if primary_ok:
             return True, 'google-grounding'
-        return False, primary_error or 'search providers unavailable'
+        if primary_error:
+            problems.append(f'grounding: {primary_error}')
+        if self.config.web.searxng_base_url:
+            # Configured but unprobed. Reported as a degraded state rather than
+            # as health: a URL in a config file is not a running service.
+            return False, '; '.join((*problems, 'searxng configured but unverified')) or 'searxng configured but unverified'
+        return False, '; '.join(problems) or 'search providers unavailable'
 
     def invalidate_cache(self) -> None:
         self._orchestrator.invalidate_cache()

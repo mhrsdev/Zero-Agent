@@ -30,7 +30,8 @@ class WigoloProvider(SearchProvider):
         )
         data = json.loads(raw)
         results: list[SearchResult] = []
-        for item in data.get("results", []):
+        # See searxng.py: a null `results` must read as empty, not raise.
+        for item in (data.get("results") or []):
             url = str(item.get("url") or "").strip()
             title = str(item.get("title") or "").strip()
             if not url or not title or urlsplit(url).scheme not in {"http", "https"}:

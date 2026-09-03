@@ -11,6 +11,12 @@ _AUTHORITY = {
     'openai.com': 1.0, 'nvidia.com': 1.0, 'microsoft.com': 0.95, 'google.com': 0.95,
     'reuters.com': 0.95, 'apnews.com': 0.95, 'bbc.com': 0.9, 'wikipedia.org': 0.8,
 }
+# Words the query rewriter adds itself. They are not part of what the user asked
+# about, so the relevance gate must not demand them of a result.
+_GATE_FILLER = frozenset({
+    'latest', 'news', 'اخبار', 'آخرین', 'اخرین', 'خبر', 'today', 'امروز',
+    'official', 'documentation', 'independent', 'review', 'analysis', 'verified',
+})
 
 
 class ResultRanker:
@@ -45,16 +51,26 @@ class ResultRanker:
         return sorted(results, key=lambda row: (row.score, row.title.lower()), reverse=True)
 
     def is_relevant(self, plan: QueryPlan, result: SearchResult) -> bool:
-        terms = [term.casefold() for term in plan.exact_terms if len(term) > 1 or term.isdigit()]
+        # Filler the rewriter itself adds. Requiring two matches out of terms the
+        # user never typed rejected every legitimate result for a news query:
+        # "آخرین اخبار زومیت" carries three terms of which two are the rewriter's
+        # own words, and a real zoomit.ir article matches only "زومیت". The gate
+        # must judge the subject, not the scaffolding.
+        terms = [
+            term.casefold() for term in plan.exact_terms
+            if (len(term) > 1 or term.isdigit()) and term.casefold() not in _GATE_FILLER
+        ]
         if not terms:
             return True
-        haystack = f'{result.title} {result.snippet} {result.publisher}'.casefold()
+        haystack = f'{result.title} {result.snippet} {result.publisher} {result.url}'.casefold()
         if ('kimi' in terms or 'کیمی' in terms) and '3' in terms:
             version_match = bool(re.search(r'(?:\bkimi|کیمی)[\s_-]*(?:k[\s_-]*)?3\b', haystack, re.I))
             ai_context = any(marker in haystack for marker in ('moonshot', 'artificial intelligence', ' ai ', 'llm', 'language model', 'هوش مصنوعی', 'مدل زبانی', 'benchmark', 'agent'))
             return version_match and ai_context
         matched = sum(term in haystack for term in terms)
-        required = 1 if len(terms) == 1 else 2
+        # Two matches is a reasonable bar for a rich query and an impossible one
+        # for a two-term subject where the publisher name is transliterated.
+        required = 1 if len(terms) <= 2 else 2
         return matched >= required
 
 

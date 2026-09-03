@@ -17,6 +17,46 @@ from urllib.parse import urlsplit
 _MAX_IDLE_HOSTS = 32
 
 
+class TransportError(RuntimeError):
+    """Base for transport failures.
+
+    Every failure used to be a bare ``RuntimeError``, and the pipeline logs only
+    the exception type — so a 403 from a SearXNG instance with the JSON format
+    disabled, a 400 from a bad provider payload, a 502, a rejected redirect and a
+    blocked private destination were all recorded as
+    ``exception_type=RuntimeError``, which is unactionable. These types exist so
+    the log names the actual class of failure.
+    """
+
+
+class HttpStatusError(TransportError):
+    def __init__(self, status: int) -> None:
+        super().__init__(f'HTTP {status}')
+        self.status = status
+
+
+class HttpRedirectRejected(TransportError):
+    """A 3xx the transport refuses to follow.
+
+    Redirects are not followed on purpose: following one re-points the request at
+    a host the SSRF guard never resolved. Carrying the location lets a caller
+    decide whether to re-request it through the guard.
+    """
+
+    def __init__(self, status: int, location: str = '') -> None:
+        super().__init__(f'HTTP redirect rejected: {status}')
+        self.status = status
+        self.location = location
+
+
+class DestinationRejected(TransportError, ValueError):
+    """The target resolved to a private, link-local or unresolvable address.
+
+    Also a ``ValueError`` so the existing contract test — and any caller that
+    treats a bad destination as a bad argument — keeps working.
+    """
+
+
 class ConnectionPoolTransport:
     """Small stdlib HTTP/HTTPS connection pool with async, bounded access."""
 
@@ -136,10 +176,10 @@ class ConnectionPoolTransport:
             connection.request(method, path, body=body, headers=request_headers)
             response = connection.getresponse()
             if 300 <= response.status < 400:
-                raise RuntimeError(f'HTTP redirect rejected: {response.status}')
+                raise HttpRedirectRejected(response.status, response.getheader('Location') or '')
             response_body = response.read(max_bytes + 1)
             if response.status >= 400:
-                raise RuntimeError(f'HTTP {response.status}')
+                raise HttpStatusError(response.status)
             reusable = len(response_body) <= max_bytes and not response.will_close
             charset = response.headers.get_content_charset() or 'utf-8'
             return response_body[:max_bytes].decode(charset, 'replace')
@@ -162,7 +202,7 @@ class ConnectionPoolTransport:
         else:
             addresses = _resolved_public_addresses(host, port)
             if not addresses:
-                raise ValueError('private or unresolved destination rejected')
+                raise DestinationRejected('private or unresolved destination rejected')
             pinned_ip = addresses[0]
         if scheme == 'https':
             connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl.create_default_context())
