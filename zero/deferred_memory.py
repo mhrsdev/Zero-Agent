@@ -11,11 +11,13 @@ import logging
 import re
 import sqlite3
 import time
+import weakref
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from .db_executor import SqliteWorker
 from .models import IncomingMessage
 from .memory import is_sensitive_memory_text
 
@@ -47,6 +49,11 @@ CREATE TABLE IF NOT EXISTS user_memory_notes (
 );
 CREATE INDEX IF NOT EXISTS idx_user_notes_scope ON user_memory_notes(chat_id,sender_id,status,created_at);
 """
+
+# `deferred_memories` is read with SELECT *, so the column order is part of the
+# contract between the schema above and `_row`/`_pending`.
+_ROW_KEYS = ("id","chat_id","sender_id","source_message_id","source_trace_id","kind","status","title","details","due_at","reminder_job_id","state_json","created_at","updated_at")
+_UPDATED_AT = _ROW_KEYS.index("updated_at")
 
 
 def _now() -> int:
@@ -111,34 +118,63 @@ class DeferredMemory:
         with sqlite_txn(sqlite3.connect(self.db_path, timeout=5)) as con:
             con.execute('PRAGMA busy_timeout=5000'); con.execute('PRAGMA journal_mode=WAL'); con.execute('PRAGMA foreign_keys=ON')
             con.executescript(SCHEMA)
+        self._worker = SqliteWorker(self._conn, name=f'zero-deferred-{Path(self.db_path).name}')
+        self._finalizer = weakref.finalize(self, self._worker.close)
 
     def _conn(self):
         con = sqlite3.connect(self.db_path, timeout=5)
         con.execute('PRAGMA busy_timeout=5000')
+        # This connection set busy_timeout only, so every statement on this path
+        # ran with foreign keys off while every other module in the project ran
+        # with them on: the same database enforced different rules depending on
+        # which module opened it.
+        con.execute('PRAGMA journal_mode=WAL')
+        con.execute('PRAGMA foreign_keys=ON')
         return con
 
+    def _run(self, operation: Callable[[sqlite3.Connection], Any]) -> Any:
+        """Run *operation(con)* on this module's sqlite thread, one at a time.
+
+        `should_process` runs on every inbound message from the listener, which
+        calls it synchronously, so the work cannot be awaited away; what it can
+        stop paying is the ~1.3 ms of connect-plus-PRAGMA that was 99% of the
+        call. One worker thread owns one connection for the process lifetime.
+        """
+        return self._worker.run(operation)
+
+    def close(self) -> None:
+        self._worker.close()
+
     def _pending(self, chat_id: int, sender_id: int):
+        """The live collecting row, expiring stale ones only when there are any.
+
+        This used to UPDATE unconditionally, so every inbound message took a
+        write lock on the read path to cancel nothing: the expired-row case is
+        rare and the common case is zero rows. The cancellation itself is still
+        performed — an abandoned dialog must end up `cancelled`, not sit at
+        `collecting` forever — but only when a row actually needs it.
+        """
         cutoff = _now() - self.CONTINUATION_TTL
-        with sqlite_txn(self._conn()) as con:
-            row = con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? AND status='collecting' AND updated_at>=? ORDER BY updated_at DESC LIMIT 1", (chat_id, sender_id, cutoff)).fetchone()
-            con.execute("UPDATE deferred_memories SET status='cancelled',updated_at=? WHERE chat_id=? AND sender_id=? AND status='collecting' AND updated_at<?", (_now(), chat_id, sender_id, cutoff))
-            con.commit()
-            return row
+        def _op(con):
+            rows = con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? AND status='collecting' ORDER BY updated_at DESC", (chat_id, sender_id)).fetchall()
+            expired = [row[0] for row in rows if int(row[_UPDATED_AT] or 0) < cutoff]
+            if expired:
+                con.executemany("UPDATE deferred_memories SET status='cancelled',updated_at=? WHERE id=?", [(_now(), item_id) for item_id in expired])
+                con.commit()
+            return next((row for row in rows if int(row[_UPDATED_AT] or 0) >= cutoff), None)
+        return self._run(_op)
 
     @staticmethod
     def _row(row) -> dict[str, Any] | None:
         if not row: return None
-        keys = ["id","chat_id","sender_id","source_message_id","source_trace_id","kind","status","title","details","due_at","reminder_job_id","state_json","created_at","updated_at"]
-        return dict(zip(keys, row))
+        return dict(zip(_ROW_KEYS, row))
 
     def _save(self, data: dict[str, Any]) -> None:
         now = _now()
-        with sqlite_txn(self._conn()) as con:
-            con.execute("""INSERT INTO deferred_memories(chat_id,sender_id,source_message_id,source_trace_id,kind,status,title,details,due_at,reminder_job_id,state_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (data['chat_id'],data['sender_id'],data.get('source_message_id'),data.get('source_trace_id',''),data.get('kind','reminder'),data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),data.get('reminder_job_id'),json.dumps(data.get('state',{}),ensure_ascii=False),now,now))
+        self._run(lambda con: con.execute("""INSERT INTO deferred_memories(chat_id,sender_id,source_message_id,source_trace_id,kind,status,title,details,due_at,reminder_job_id,state_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (data['chat_id'],data['sender_id'],data.get('source_message_id'),data.get('source_trace_id',''),data.get('kind','reminder'),data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),data.get('reminder_job_id'),json.dumps(data.get('state',{}),ensure_ascii=False),now,now)))
 
     def _update(self, item_id: int, data: dict[str, Any]) -> None:
-        with sqlite_txn(self._conn()) as con:
-            con.execute("UPDATE deferred_memories SET status=?,title=?,details=?,due_at=?,state_json=?,updated_at=? WHERE id=?", (data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),json.dumps(data.get('state',{}),ensure_ascii=False),_now(),item_id))
+        self._run(lambda con: con.execute("UPDATE deferred_memories SET status=?,title=?,details=?,due_at=?,state_json=?,updated_at=? WHERE id=?", (data.get('status','collecting'),data.get('title',''),data.get('details',''),data.get('due_at'),json.dumps(data.get('state',{}),ensure_ascii=False),_now(),item_id)))
 
     def _is_continuation(self, message: IncomingMessage, row: dict[str, Any]) -> bool:
         state = json.loads(row.get('state_json') or '{}') if isinstance(row.get('state_json'), str) else row.get('state', {})
@@ -189,10 +225,11 @@ class DeferredMemory:
         if not text or is_sensitive_memory_text(text) or len(text) < 8 or not re.search(r"یادت باشه|نکته\s*:|دوست دارم|دوست ندارم|شخصیتم", text, re.I): return
         section = 'likes' if 'دوست دارم' in text else 'dislikes' if 'دوست ندارم' in text else 'notes'
         estimate = max(1, len(text) // 4)
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             total = con.execute("SELECT COALESCE(SUM(token_estimate),0) FROM user_memory_notes WHERE chat_id=? AND sender_id=? AND status='active'", (message.chat_id,message.sender_id)).fetchone()[0]
             if total + estimate > 10000: return
             con.execute("INSERT INTO user_memory_notes(chat_id,sender_id,section,content,token_estimate,source_message_id,created_at) VALUES(?,?,?,?,?,?,?)", (message.chat_id,message.sender_id,section,text[:1200],estimate,message.message_id,_now()))
+        self._run(_op)
 
     async def process(self, message: IncomingMessage, router) -> tuple[str, dict[str, Any] | None]:
         """Model-led conversation; Python only validates ownership and due time."""
@@ -254,12 +291,10 @@ class DeferredMemory:
             self._update(row['id'], {**row, **data})
             ready = self._row(self._pending(message.chat_id, message.sender_id))
             if not ready:
-                with sqlite_txn(self._conn()) as con:
-                    ready = self._row(con.execute("SELECT * FROM deferred_memories WHERE id=?", (row['id'],)).fetchone())
+                ready = self._row(self._run(lambda con: con.execute("SELECT * FROM deferred_memories WHERE id=?", (row['id'],)).fetchone()))
         else:
             self._save({'chat_id': message.chat_id, 'sender_id': message.sender_id, 'source_message_id': message.message_id, 'source_trace_id': message.trace_id or '', **data})
-            with sqlite_txn(self._conn()) as con:
-                ready = self._row(con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? ORDER BY id DESC LIMIT 1", (message.chat_id, message.sender_id)).fetchone())
+            ready = self._row(self._run(lambda con: con.execute("SELECT * FROM deferred_memories WHERE chat_id=? AND sender_id=? ORDER BY id DESC LIMIT 1", (message.chat_id, message.sender_id)).fetchone()))
         return str(plan.get('reply') or '').strip()[:500], {'ready': ready} if ready else None
 
     def create_reminder_job(self, row: dict[str, Any], owner_id: int, sender_label: str = '') -> str:
@@ -271,17 +306,19 @@ class DeferredMemory:
         text = f"{sender_label} یادت نره: {row.get('title') or row.get('details','')[:240]}".strip()
         now = _now()
         schedule = {'kind': 'once', 'at': due_at, 'timezone': 'Asia/Tehran', 'explanation': 'one-shot reminder'}
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             con.execute("INSERT INTO cron_jobs(job_id,version,template_id,template_version,owner_user_id,created_by_user_id,chat_id,title,input_json,schedule_json,risk_level,approval_state,state,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (job_id,1,'reminder','1.0.0',owner_id,row['sender_id'],row['chat_id'], 'deferred reminder', json.dumps({'text': text},ensure_ascii=False), json.dumps(schedule,ensure_ascii=False), 'low','approved','enabled',due_at,now,now))
             con.execute("UPDATE deferred_memories SET status='scheduled',reminder_job_id=?,updated_at=? WHERE id=?", (job_id,now,row['id']))
+        self._run(_op)
         return job_id
 
     def notes_context(self, message: IncomingMessage, limit: int = 6) -> str:
         words = {w for w in re.findall(r"[\w\u0600-\u06ff]{3,}", _norm(message.text))}
-        with sqlite_txn(self._conn()) as con:
+        def _op(con):
             rows = con.execute("SELECT id,section,content FROM user_memory_notes WHERE chat_id=? AND sender_id=? AND status='active' ORDER BY created_at DESC LIMIT 100", (message.chat_id,message.sender_id)).fetchall()
             selected = [row for row in rows if not words or words & set(re.findall(r"[\w\u0600-\u06ff]{3,}", _norm(row[2])))] [:limit]
             if selected:
                 con.executemany('UPDATE user_memory_notes SET last_used_at=? WHERE id=?', [(_now(), row[0]) for row in selected])
                 con.commit()
-        return '\n'.join(f"[{section}] {content}" for _,section,content in selected)
+            return selected
+        return '\n'.join(f"[{section}] {content}" for _,section,content in self._run(_op))
