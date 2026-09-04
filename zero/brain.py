@@ -1077,15 +1077,27 @@ class ZeroBrain:
             logger.info('WEB_SEARCH_SKIPPED trace_id=%s reason=intent_not_detected', trace_id)
         else:
             if deep_search:
-                user_limit = 12 if message.sender_id == self.config.owner_user_id else 3
-                allowed, used = await self.store.try_reserve_rate_event(message.sender_id, 'deep_search', 3600, user_limit)
-                if not allowed:
-                    logger.info('DEEP_SEARCH_RATE_LIMIT trace_id=%s sender_id=%s used=%s limit=%s', trace_id, message.sender_id, used, user_limit)
-                    return Decision(True, 'deep_search_rate_limit'), 'سهمیهٔ سرچ عمیق این ساعتت تموم شده؛ کمی بعد دوباره امتحان کن.'
-                global_allowed, global_used = await self.store.try_reserve_rate_event(0, 'deep_search_global', 3600, 30)
-                if not global_allowed:
-                    logger.info('DEEP_SEARCH_GLOBAL_LIMIT trace_id=%s used=%s limit=30', trace_id, global_used)
-                    return Decision(True, 'deep_search_global_limit'), 'ظرفیت سرچ عمیق فعلاً پر شده؛ کمی بعد دوباره امتحان کن.'
+                # Quotas come from config and 0 means unlimited; this deployment
+                # ships unlimited. The global check runs BEFORE the per-user
+                # reservation on purpose: reserving the user's slot first spent it
+                # even when the install-wide capacity was already full, so a user
+                # was charged for a deep search that never ran.
+                web_cfg = self.config.web
+                global_limit = int(web_cfg.deep_search_global_hourly or 0)
+                if global_limit > 0:
+                    global_allowed, global_used = await self.store.try_reserve_rate_event(0, 'deep_search_global', 3600, global_limit)
+                    if not global_allowed:
+                        logger.info('DEEP_SEARCH_GLOBAL_LIMIT trace_id=%s used=%s limit=%s', trace_id, global_used, global_limit)
+                        return Decision(True, 'deep_search_global_limit'), 'ظرفیت سرچ عمیق فعلاً پر شده؛ کمی بعد دوباره امتحان کن.'
+                is_owner = message.sender_id == self.config.owner_user_id
+                user_limit = int((web_cfg.deep_search_owner_hourly if is_owner else web_cfg.deep_search_user_hourly) or 0)
+                if user_limit > 0:
+                    allowed, used = await self.store.try_reserve_rate_event(message.sender_id, 'deep_search', 3600, user_limit)
+                    if not allowed:
+                        logger.info('DEEP_SEARCH_RATE_LIMIT trace_id=%s sender_id=%s used=%s limit=%s', trace_id, message.sender_id, used, user_limit)
+                        return Decision(True, 'deep_search_rate_limit'), 'سهمیهٔ سرچ عمیق این ساعتت تموم شده؛ کمی بعد دوباره امتحان کن.'
+                if global_limit <= 0 and user_limit <= 0:
+                    logger.info('DEEP_SEARCH_UNLIMITED trace_id=%s sender_id=%s', trace_id, message.sender_id)
             try:
                 run_search = self.web.run(
                     search_text,

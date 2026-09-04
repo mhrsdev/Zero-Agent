@@ -230,7 +230,17 @@ def test_deep_search_reaches_brain_with_report_instruction(tmp_path: Path):
     asyncio.run(scenario())
 
 
-def test_deep_search_has_independent_atomic_user_limit(tmp_path: Path):
+def test_deep_search_quota_comes_from_config_and_zero_means_unlimited(tmp_path: Path):
+    """The 3/12/30 quotas were hardcoded in brain.py. They are settings now
+    (`web.deep_search_*_hourly`), and this deployment ships 0 — no limit — so the
+    default configuration must let every deep search through, while a configured
+    quota must still be enforced with the same decision and message.
+
+    Replaces test_deep_search_has_independent_atomic_user_limit, whose
+    `deep_web.calls == 3` assertion pinned the old hardcoded default. The property
+    it protected — that a quota, when configured, is enforced per user — is kept
+    in the second half of this test.
+    """
     async def scenario():
         config = build_config(tmp_path)
         store = ZeroStore(config.memory.db_path)
@@ -239,12 +249,56 @@ def test_deep_search_has_independent_atomic_user_limit(tmp_path: Path):
         deep_web = CapturingDeepWeb()
         brain.web = deep_web
 
+        # Default config: no quota, so a fourth call goes through.
         replies = []
         for message_id in range(1, 5):
-            replies.append(await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id=f'rate-{message_id}', message_id=message_id)))
+            replies.append(await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id=f'unlimited-{message_id}', message_id=message_id)))
+        assert deep_web.calls == 4, "the shipped default is unlimited"
+        assert all(reply[0].should_reply for reply in replies)
 
-        assert deep_web.calls == 3
-        assert replies[-1][0].reason == 'deep_search_rate_limit'
+        # A configured quota is still enforced, per user.
+        limited = config.model_copy(update={'web': config.web.model_copy(update={
+            'deep_search_user_hourly': 3,
+            'deep_search_global_hourly': 30,
+        })})
+        brain_limited = ZeroBrain(limited, store, router)
+        deep_web_limited = CapturingDeepWeb()
+        brain_limited.web = deep_web_limited
+
+        limited_replies = []
+        for message_id in range(1, 5):
+            limited_replies.append(await brain_limited.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=77, sender_label='@other', text='/deepsearch Kimi 3', trace_id=f'limited-{message_id}', message_id=message_id)))
+
+        assert deep_web_limited.calls == 3
+        assert limited_replies[-1][0].reason == 'deep_search_rate_limit'
+
+    asyncio.run(scenario())
+
+
+def test_deep_search_global_capacity_is_not_charged_to_the_user(tmp_path: Path):
+    """The global check used to run AFTER the per-user reservation, so when the
+    install-wide capacity was already full a user spent their own quota on a deep
+    search that never ran."""
+    async def scenario():
+        config = build_config(tmp_path)
+        config = config.model_copy(update={'web': config.web.model_copy(update={
+            'deep_search_user_hourly': 3,
+            'deep_search_global_hourly': 1,
+        })})
+        store = ZeroStore(config.memory.db_path)
+        router = CapturingRouter('گزارش کوتاه')
+        brain = ZeroBrain(config, store, router)
+        deep_web = CapturingDeepWeb()
+        brain.web = deep_web
+
+        await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id='global-1', message_id=1))
+        blocked = await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=55, sender_label='@user', text='/deepsearch Kimi 3', trace_id='global-2', message_id=2))
+        assert blocked[0].reason == 'deep_search_global_limit'
+
+        # A different user must still have their full personal quota: the blocked
+        # attempt reserved nothing on the second user's behalf.
+        fresh = await brain.maybe_reply(IncomingMessage(chat_id=-99, chat_title='t', sender_id=66, sender_label='@other', text='/deepsearch Kimi 3', trace_id='global-3', message_id=3))
+        assert fresh[0].reason != 'deep_search_rate_limit', "user 66 was charged for user 55's blocked search"
 
     asyncio.run(scenario())
 

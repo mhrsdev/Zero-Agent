@@ -170,6 +170,21 @@ class WebConfig(BaseModel):
     provider_retries: int = 1
     cache_ttl_seconds: int = 1800
     context_max_chars: int = 2500
+    # Deep-search quotas, per rolling hour. 0 means no limit.
+    #
+    # These were hardcoded in zero/brain.py as 3 per user, 12 for the owner and
+    # 30 across the whole install, so changing them meant editing the reply path.
+    # They are settings now, and the shipped default is unlimited because that is
+    # what this deployment asked for.
+    #
+    # Deep search is the most expensive operation in the system: it expands one
+    # question into four query variants, extracts up to 15 pages instead of 2,
+    # builds a 20,000-character context instead of 2,500, and answers with a
+    # 2,200-token budget instead of 700. Raise these above 0 if provider spend
+    # needs a ceiling; deep_search_global_hourly is the one that bounds total cost.
+    deep_search_user_hourly: int = 0
+    deep_search_owner_hourly: int = 0
+    deep_search_global_hourly: int = 0
 
 
 class TelegramSearchConfig(BaseModel):

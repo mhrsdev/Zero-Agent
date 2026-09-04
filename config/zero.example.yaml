@@ -75,6 +75,13 @@ web:
   provider_retries: 1
   cache_ttl_seconds: 1800
   context_max_chars: 2500
+  # Deep-search quotas per rolling hour. 0 = no limit (the default).
+  # deep_search_user_hourly applies to everyone; deep_search_owner_hourly to the
+  # owner; deep_search_global_hourly caps the whole installation and is checked
+  # before a user's own quota is spent.
+  deep_search_user_hourly: 0
+  deep_search_owner_hourly: 0
+  deep_search_global_hourly: 0
 telegram_search:
   enabled: false
   api_id: 0
